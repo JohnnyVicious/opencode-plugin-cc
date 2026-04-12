@@ -62,3 +62,42 @@ export function tailLines(filePath, n = 10) {
     return [];
   }
 }
+
+/**
+ * Read Claude Code project-level deny rules from .claude/settings.json.
+ * Returns an array of {path, read, edit} deny entries found, if any.
+ * @param {string} cwd
+ * @returns {{ path: string, read?: boolean, edit?: boolean }[]}
+ */
+export function readDenyRules(cwd) {
+  try {
+    const settingsPath = path.join(cwd, ".claude", "settings.json");
+    const data = readJson(settingsPath);
+    if (!data || typeof data !== "object") return [];
+    const deny = data.deny ?? data.permission?.deny;
+    if (!Array.isArray(deny)) return [];
+    return deny.filter(
+      (rule) =>
+        rule &&
+        typeof rule === "object" &&
+        typeof rule.path === "string"
+    );
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Check if any deny rules apply to a given path.
+ * @param {{ path: string, read?: boolean, edit?: boolean }[]} rules
+ * @param {string} targetPath
+ * @returns {boolean}
+ */
+export function denyRulesApplyToPath(rules, targetPath) {
+  if (!rules || rules.length === 0) return false;
+  for (const rule of rules) {
+    if (rule.path === targetPath) return true;
+    if (targetPath.startsWith(rule.path + path.sep)) return true;
+  }
+  return false;
+}

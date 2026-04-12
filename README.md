@@ -134,6 +134,15 @@ If applying the patch fails, the worktree is preserved for manual recovery.
 
 After a successful `/opencode:review` or `/opencode:adversarial-review`, the rendered review is saved for the current repository. If you run `/opencode:rescue` with no task text, Claude can offer to pass the last review findings back to OpenCode as the rescue task.
 
+## Permission Boundary
+
+OpenCode runs as an independent process with its own permission system, separate from Claude Code's `.claude/settings.json` deny rules. This means:
+
+- A file that Claude Code cannot read or edit (due to a deny rule) **may still be accessible to OpenCode**.
+- `/opencode:rescue` is write-capable by default and has full read/write access to the workspace.
+
+If your workspace uses deny rules, the companion will emit a warning when you start a write-capable task so you can make an informed choice. For fully isolated write operations, use `/opencode:rescue --worktree` which runs in an disposable git worktree.
+
 ## Troubleshooting
 
 <details>

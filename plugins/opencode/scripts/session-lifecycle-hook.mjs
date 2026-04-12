@@ -4,7 +4,7 @@
 // Called on SessionStart and SessionEnd events to manage the OpenCode server.
 
 import process from "node:process";
-import { isServerRunning } from "./lib/opencode-server.mjs";
+import { isServerRunning, reapServerIfOurs } from "./lib/opencode-server.mjs";
 import { resolveWorkspace } from "./lib/workspace.mjs";
 import { loadState } from "./lib/state.mjs";
 
@@ -22,6 +22,13 @@ async function main() {
   }
 
   if (event === "SessionEnd") {
+    // Reap the plugin-spawned OpenCode server (if idle > 5 min).
+    try {
+      await reapServerIfOurs(workspace);
+    } catch {
+      // best-effort
+    }
+
     // Clean up: check for any orphaned running jobs and mark them as failed
     const state = loadState(workspace);
     const runningJobs = (state.jobs ?? []).filter((j) => j.status === "running");
