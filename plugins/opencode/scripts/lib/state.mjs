@@ -14,6 +14,9 @@ const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "opencode-companion");
 const MIGRATION_LOCK_STALE_MS = 5 * 60 * 1000;
 const MIGRATION_WAIT_MS = 2000;
 const PATH_KEYS = new Set(["logFile", "dataFile"]);
+const STATE_LOCK_STALE_MS = 30_000;
+const STATE_LOCK_WAIT_MS = 5_000;
+const STATE_LOCK_RETRY_MS = 50;
 
 function workspaceHash(workspacePath) {
   return crypto.createHash("sha256").update(workspacePath).digest("hex").slice(0, 16);
@@ -210,14 +213,91 @@ function stateFile(root) {
 }
 
 /**
+ * Acquire an exclusive lock on the state file for a given root directory.
+ * Uses a sibling `.lock` file created with O_EXCL. Stale locks older than
+ * STATE_LOCK_STALE_MS are forcibly removed. Blocks up to STATE_LOCK_WAIT_MS
+ * with STATE_LOCK_RETRY_MS intervals.
+ *
+ * @param {string} root - the stateRoot directory
+ * @returns {{ fd: number, lockPath: string }}
+ */
+function acquireStateLock(root) {
+  const lockPath = stateFile(root) + ".lock";
+  ensureDir(path.dirname(lockPath));
+
+  const deadline = Date.now() + STATE_LOCK_WAIT_MS;
+
+  while (true) {
+    try {
+      const fd = fs.openSync(lockPath, "wx");
+      try {
+        fs.writeSync(fd, `${process.pid}\n${new Date().toISOString()}\n`);
+      } catch {}
+      return { fd, lockPath };
+    } catch (err) {
+      if (err?.code !== "EEXIST") throw err;
+
+      try {
+        const stat = fs.statSync(lockPath);
+        if (Date.now() - stat.mtimeMs > STATE_LOCK_STALE_MS) {
+          fs.rmSync(lockPath, { force: true });
+          continue;
+        }
+      } catch (statErr) {
+        if (statErr?.code !== "ENOENT") throw statErr;
+        continue;
+      }
+
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Timed out waiting for state lock after ${Math.round(STATE_LOCK_WAIT_MS / 1000)}s: ${lockPath}. ` +
+          "If no other companion process is running, delete the lock file manually."
+        );
+      }
+
+      sleepSync(STATE_LOCK_RETRY_MS);
+    }
+  }
+}
+
+/**
+ * Release a state lock previously acquired by acquireStateLock.
+ * @param {{ fd: number | null, lockPath: string } | null} lock
+ */
+function releaseStateLock(lock) {
+  if (!lock) return;
+  if (lock.fd != null) {
+    try { fs.closeSync(lock.fd); } catch {}
+  }
+  try { fs.rmSync(lock.lockPath, { force: true }); } catch {}
+}
+
+/**
+ * Load state from an already-resolved root directory (no migration check).
+ * @param {string} root
+ * @returns {{ config: object, jobs: object[] }}
+ */
+function loadStateFromRoot(root) {
+  const data = readJson(stateFile(root));
+  return data ?? { config: {}, jobs: [] };
+}
+
+/**
+ * Save state to an already-resolved root directory (no migration check).
+ * @param {string} root
+ * @param {object} state
+ */
+function saveStateToRoot(root, state) {
+  writeJson(stateFile(root), state);
+}
+
+/**
  * Load the state for a workspace.
  * @param {string} workspacePath
  * @returns {{ config: object, jobs: object[] }}
  */
 export function loadState(workspacePath) {
-  const root = stateRoot(workspacePath);
-  const data = readJson(stateFile(root));
-  return data ?? { config: {}, jobs: [] };
+  return loadStateFromRoot(stateRoot(workspacePath));
 }
 
 /**
@@ -226,21 +306,28 @@ export function loadState(workspacePath) {
  * @param {object} state
  */
 export function saveState(workspacePath, state) {
-  const root = stateRoot(workspacePath);
-  writeJson(stateFile(root), state);
+  saveStateToRoot(stateRoot(workspacePath), state);
 }
 
 /**
- * Update the state atomically using a mutator function.
+ * Update the state atomically using a mutator function. Acquires an
+ * exclusive file lock for the read-modify-write cycle so concurrent
+ * companion processes cannot lose each other's writes.
  * @param {string} workspacePath
  * @param {(state: object) => void} mutator
  * @returns {object} the updated state
  */
 export function updateState(workspacePath, mutator) {
-  const state = loadState(workspacePath);
-  mutator(state);
-  saveState(workspacePath, state);
-  return state;
+  const root = stateRoot(workspacePath);
+  const lock = acquireStateLock(root);
+  try {
+    const state = loadStateFromRoot(root);
+    mutator(state);
+    saveStateToRoot(root, state);
+    return state;
+  } finally {
+    releaseStateLock(lock);
+  }
 }
 
 /**
