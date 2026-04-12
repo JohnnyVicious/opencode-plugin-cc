@@ -1,6 +1,6 @@
 ---
 description: Run a steerable adversarial OpenCode review that challenges implementation and design decisions
-argument-hint: '[--wait|--background] [--base <ref>] [--model <id>] [--pr <number>] [focus area or custom review instructions]'
+argument-hint: '[--wait|--background] [--base <ref>] [--model <id> | --free] [--pr <number>] [focus area or custom review instructions]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), Bash(gh:*), AskUserQuestion
 ---
@@ -34,10 +34,11 @@ Execution mode rules:
 
 Argument handling:
 - Preserve the user's arguments exactly.
-- Do not strip `--wait`, `--background`, `--model`, or `--pr` yourself.
+- Do not strip `--wait`, `--background`, `--model`, `--free`, or `--pr` yourself.
 - Adversarial reviews support custom focus text. Any text after flags is treated as a focus area.
 - The companion script handles `--adversarial` internally.
 - `--model <id>` overrides OpenCode's default model for this single review (e.g. `--model openrouter/anthropic/claude-opus-4-6`). Pass it through verbatim if the user supplied it.
+- `--free` tells the companion script to shell out to `opencode models`, filter for free-tier models (those ending in `:free` or `-free`), and pick one at random for this review. Pass it through verbatim if the user supplied it. `--free` and `--model` are mutually exclusive — the companion will error if both are given.
 - `--pr <number>` reviews a GitHub pull request via `gh pr diff` instead of the local working tree. The cwd must be a git repo whose remote points at the PR's repository, and `gh` must be installed and authenticated.
 
 PR reference extraction (REQUIRED — read this carefully):

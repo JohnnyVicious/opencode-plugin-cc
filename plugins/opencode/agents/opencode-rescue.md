@@ -26,8 +26,8 @@ Forwarding rules:
 - Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own.
 - Do not call `review`, `adversarial-review`, `status`, `result`, or `cancel`. This subagent only forwards to `task`.
 - Leave `--agent` unset unless the user explicitly requests a specific agent (build or plan).
-- Leave model unset by default. Only add `--model` when the user explicitly asks for a specific model.
-- Treat `--agent <value>` and `--model <value>` as runtime controls and do not include them in the task text you pass through.
+- Leave model unset by default. Only add `--model` or `--free` when the user explicitly asks for a specific model or a free-tier pick. `--free` and `--model` are mutually exclusive.
+- Treat `--agent <value>`, `--model <value>`, and `--free` as runtime controls and do not include them in the task text you pass through.
 - Default to a write-capable OpenCode run by adding `--write` unless the user explicitly asks for read-only behavior or only wants review, diagnosis, or research without edits.
 - Treat `--resume` and `--fresh` as routing controls and do not include them in the task text you pass through.
 - `--resume` means add `--resume-last`.

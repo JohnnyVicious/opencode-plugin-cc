@@ -32,7 +32,18 @@
 //     `{providerID, modelID}` object before sending. Passing the raw
 //     CLI string caused HTTP 400 ("expected object, received string")
 //     on every `--model` invocation — the original threading commit
-//     wired the argument through but never adapted the shape.
+//     wired the argument through but never adapted the shape;
+//   - add a `--free` flag to review, adversarial-review, and task
+//     handlers that shells out to `opencode models`, filters for the
+//     `:free` / `-free` suffix, and picks one at random so callers
+//     can cheaply fire off reviews/tasks against whichever free-tier
+//     model is available without hand-picking. Mutually exclusive
+//     with `--model`. For background tasks the free model is locked
+//     in at dispatch so the worker can't drift;
+//   - fix `handleTask` silently dropping `--model`: the foreground
+//     path passed `{agent}` to sendPrompt with no model, and the
+//     background worker never parsed or forwarded one. Both paths
+//     now honor `--model` / `--free` end-to-end.
 // (Apache License 2.0 §4(b) modification notice.)
 
 import path from "node:path";
@@ -58,7 +69,7 @@ import { buildReviewPrompt, buildTaskPrompt } from "./lib/prompts.mjs";
 import { getDiff, getStatus as getGitStatus, detectPrReference } from "./lib/git.mjs";
 import { readJson } from "./lib/fs.mjs";
 import { resolveReviewAgent } from "./lib/review-agent.mjs";
-import { parseModelString } from "./lib/model.mjs";
+import { parseModelString, selectFreeModel } from "./lib/model.mjs";
 
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(import.meta.dirname, "..");
 
@@ -153,15 +164,55 @@ async function handleSetup(argv) {
 // Review
 // ------------------------------------------------------------------
 
+/**
+ * Resolve the model the user requested. Handles three cases:
+ *   - `--free`      : pick a random free model via `opencode models`
+ *   - `--model X`   : parse X into {providerID, modelID}
+ *   - neither       : return null (use the user's configured default)
+ *
+ * `--free` and `--model` are mutually exclusive. Errors bubble up to the
+ * handler, which prints them and exits non-zero.
+ *
+ * @param {{ free?: boolean, model?: string }} options
+ * @returns {Promise<{providerID: string, modelID: string, raw?: string} | null>}
+ */
+async function resolveRequestedModel(options) {
+  if (options.free && options.model) {
+    throw new Error("--free and --model are mutually exclusive; pick one.");
+  }
+  if (options.free) {
+    return selectFreeModel();
+  }
+  if (options.model) {
+    const parsed = parseModelString(options.model);
+    if (!parsed) {
+      throw new Error(
+        `Invalid --model value: ${options.model} (expected "provider/model-id", ` +
+        `e.g. openrouter/anthropic/claude-haiku-4.5)`
+      );
+    }
+    return { ...parsed, raw: options.model };
+  }
+  return null;
+}
+
 async function handleReview(argv) {
   const { options } = parseArgs(argv, {
     valueOptions: ["base", "scope", "model", "pr"],
-    booleanOptions: ["wait", "background"],
+    booleanOptions: ["wait", "background", "free"],
   });
 
   const prNumber = options.pr ? Number(options.pr) : null;
   if (options.pr && !Number.isFinite(prNumber)) {
     console.error(`Invalid --pr value: ${options.pr} (must be a number)`);
+    process.exit(1);
+  }
+
+  let requestedModel;
+  try {
+    requestedModel = await resolveRequestedModel(options);
+  } catch (err) {
+    console.error(err.message);
     process.exit(1);
   }
 
@@ -188,14 +239,14 @@ async function handleReview(argv) {
       }, PLUGIN_ROOT);
 
       const reviewAgent = await resolveReviewAgent(client, log);
-      const model = parseModelString(options.model);
+      const modelLabel = requestedModel?.raw ?? requestedModel ?? null;
 
       report("reviewing", "Running review...");
-      log(`Prompt length: ${prompt.length} chars, agent: ${reviewAgent.agent}${options.model ? `, model: ${options.model}` : ""}${prNumber ? `, pr: #${prNumber}` : ""}`);
+      log(`Prompt length: ${prompt.length} chars, agent: ${reviewAgent.agent}${modelLabel ? `, model: ${modelLabel}${options.free ? " (--free picked)" : ""}` : ""}${prNumber ? `, pr: #${prNumber}` : ""}`);
 
       const response = await client.sendPrompt(session.id, prompt, {
         agent: reviewAgent.agent,
-        model,
+        model: requestedModel ? { providerID: requestedModel.providerID, modelID: requestedModel.modelID } : null,
         tools: reviewAgent.tools,
       });
 
@@ -224,8 +275,16 @@ async function handleReview(argv) {
 async function handleAdversarialReview(argv) {
   const { options, positional } = parseArgs(argv, {
     valueOptions: ["base", "scope", "model", "pr"],
-    booleanOptions: ["wait", "background"],
+    booleanOptions: ["wait", "background", "free"],
   });
+
+  let requestedModel;
+  try {
+    requestedModel = await resolveRequestedModel(options);
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
 
   let focus = positional.join(" ").trim();
 
@@ -272,14 +331,14 @@ async function handleAdversarialReview(argv) {
       }, PLUGIN_ROOT);
 
       const reviewAgent = await resolveReviewAgent(client, log);
-      const model = parseModelString(options.model);
+      const modelLabel = requestedModel?.raw ?? null;
 
       report("reviewing", "Running adversarial review...");
-      log(`Prompt length: ${prompt.length} chars, agent: ${reviewAgent.agent}, focus: ${focus || "(none)"}${options.model ? `, model: ${options.model}` : ""}${prNumber ? `, pr: #${prNumber}` : ""}`);
+      log(`Prompt length: ${prompt.length} chars, agent: ${reviewAgent.agent}, focus: ${focus || "(none)"}${modelLabel ? `, model: ${modelLabel}${options.free ? " (--free picked)" : ""}` : ""}${prNumber ? `, pr: #${prNumber}` : ""}`);
 
       const response = await client.sendPrompt(session.id, prompt, {
         agent: reviewAgent.agent,
-        model,
+        model: requestedModel ? { providerID: requestedModel.providerID, modelID: requestedModel.modelID } : null,
         tools: reviewAgent.tools,
       });
 
@@ -311,15 +370,26 @@ async function handleAdversarialReview(argv) {
 async function handleTask(argv) {
   const { options, positional } = parseArgs(argv, {
     valueOptions: ["model", "agent"],
-    booleanOptions: ["write", "background", "wait", "resume-last", "fresh"],
+    booleanOptions: ["write", "background", "wait", "resume-last", "fresh", "free"],
   });
 
   const taskText = extractTaskText(argv, ["model", "agent"], [
-    "write", "background", "wait", "resume-last", "fresh",
+    "write", "background", "wait", "resume-last", "fresh", "free",
   ]);
 
   if (!taskText) {
     console.error("No task text provided.");
+    process.exit(1);
+  }
+
+  // Resolve --free / --model once here so background workers inherit a
+  // concrete model string and can't drift if `opencode models` changes
+  // between dispatch and execution.
+  let requestedModel;
+  try {
+    requestedModel = await resolveRequestedModel(options);
+  } catch (err) {
+    console.error(err.message);
     process.exit(1);
   }
 
@@ -359,10 +429,20 @@ async function handleTask(argv) {
     ];
     if (isWrite) workerArgs.push("--write");
     if (resumeSessionId) workerArgs.push("--resume-session", resumeSessionId);
-    if (options.model) workerArgs.push("--model", options.model);
+    // Pass the resolved model (from --model or --free) as a concrete
+    // "provider/model-id" string so the worker doesn't need to re-run
+    // `opencode models`.
+    if (requestedModel?.raw) {
+      workerArgs.push("--model", requestedModel.raw);
+    } else if (requestedModel) {
+      workerArgs.push("--model", `${requestedModel.providerID}/${requestedModel.modelID}`);
+    }
 
     spawnDetached("node", workerArgs, { cwd: workspace });
     console.log(`OpenCode task started in background: ${job.id}`);
+    if (options.free && requestedModel) {
+      console.log(`--free picked: ${requestedModel.raw}`);
+    }
     console.log("Check `/opencode:status` for progress.");
     return;
   }
@@ -387,10 +467,11 @@ async function handleTask(argv) {
       const prompt = buildTaskPrompt(taskText, { write: isWrite });
 
       report("investigating", "Sending task to OpenCode...");
-      log(`Agent: ${agentName}, Write: ${isWrite}, Prompt: ${prompt.length} chars`);
+      log(`Agent: ${agentName}, Write: ${isWrite}, Prompt: ${prompt.length} chars${requestedModel?.raw ? `, model: ${requestedModel.raw}${options.free ? " (--free picked)" : ""}` : ""}`);
 
       const response = await client.sendPrompt(sessionId, prompt, {
         agent: agentName,
+        model: requestedModel ? { providerID: requestedModel.providerID, modelID: requestedModel.modelID } : null,
       });
 
       report("finalizing", "Processing task output...");
@@ -437,6 +518,10 @@ async function handleTaskWorker(argv) {
   const agentName = options.agent ?? "build";
   const isWrite = !!options.write;
   const resumeSessionId = options["resume-session"];
+  // Parent `handleTask` resolves --free/--model into a concrete
+  // provider/model-id string before spawning us, so the worker just
+  // needs to parse and forward it.
+  const workerModel = parseModelString(options.model);
 
   if (!workspace || !jobId || !taskText) {
     process.exit(1);
@@ -460,9 +545,11 @@ async function handleTaskWorker(argv) {
 
       const prompt = buildTaskPrompt(taskText, { write: isWrite });
       report("investigating", "Running task...");
+      if (workerModel) log(`Worker model: ${options.model}`);
 
       const response = await client.sendPrompt(sessionId, prompt, {
         agent: agentName,
+        model: workerModel,
       });
 
       const text = extractResponseText(response);
