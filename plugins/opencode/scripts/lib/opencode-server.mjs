@@ -36,7 +36,11 @@ const SERVER_START_TIMEOUT = 30_000;
 export function getBundledConfigDir() {
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
   if (!pluginRoot) return null;
-  return path.join(pluginRoot, "opencode-config");
+  const configDir = path.join(pluginRoot, "opencode-config");
+  try {
+    if (fs.existsSync(configDir)) return configDir;
+  } catch {}
+  return null;
 }
 
 /**

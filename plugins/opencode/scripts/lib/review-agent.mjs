@@ -73,7 +73,7 @@ export async function resolveReviewAgent(client, log = () => {}) {
     const names = extractAgentNames(agents);
 
     if (names.includes("review")) {
-      return { agent: "review" };
+      return { agent: "review", tools: undefined };
     }
 
     log(

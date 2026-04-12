@@ -7,7 +7,9 @@ allowed-tools: Bash(node:*), Bash(npm:*), Bash(brew:*), Bash(curl:*), AskUserQue
 Run:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" setup --json "$ARGUMENTS"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/safe-command.mjs" setup <<'OPENCODE_ARGS'
+$ARGUMENTS
+OPENCODE_ARGS
 ```
 
 If the result says OpenCode is unavailable:
@@ -25,7 +27,9 @@ npm install -g opencode-ai
 - Then rerun:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" setup --json "$ARGUMENTS"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/safe-command.mjs" setup <<'OPENCODE_ARGS'
+$ARGUMENTS
+OPENCODE_ARGS
 ```
 
 If OpenCode is already installed:

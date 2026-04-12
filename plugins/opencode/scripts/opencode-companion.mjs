@@ -129,6 +129,32 @@ async function handleSetup(argv) {
     booleanOptions: ["json", "enable-review-gate", "disable-review-gate"],
   });
 
+  let reviewGateOverride;
+  if (options["enable-review-gate"]) reviewGateOverride = true;
+  if (options["disable-review-gate"]) reviewGateOverride = false;
+
+  let reviewGateMaxPerSessionOverride;
+  if (options["review-gate-max"] != null) {
+    const raw = options["review-gate-max"];
+    const max = raw === "off" ? null : Number(raw);
+    if (max !== null && (!Number.isInteger(max) || max < 1)) {
+      console.error(`--review-gate-max must be a positive integer or "off".`);
+      process.exit(1);
+    }
+    reviewGateMaxPerSessionOverride = max;
+  }
+
+  let reviewGateCooldownMinutesOverride;
+  if (options["review-gate-cooldown"] != null) {
+    const raw = options["review-gate-cooldown"];
+    const cooldown = raw === "off" ? null : Number(raw);
+    if (cooldown !== null && (!Number.isInteger(cooldown) || cooldown < 1)) {
+      console.error(`--review-gate-cooldown must be a positive integer (minutes) or "off".`);
+      process.exit(1);
+    }
+    reviewGateCooldownMinutesOverride = cooldown;
+  }
+
   const installed = await isOpencodeInstalled();
   const version = installed ? await getOpencodeVersion() : null;
 
@@ -144,57 +170,36 @@ async function handleSetup(argv) {
     // auth methods each provider supports. auth.json is the same source
     // of truth that `opencode providers list` uses, and it works whether
     // or not the OpenCode server is running.
-    providers = getConfiguredProviders();
+    try {
+      providers = getConfiguredProviders();
+    } catch (err) {
+      console.error(`Warning: could not read configured providers: ${err.message}`);
+    }
   }
 
-  // Handle review gate toggle
+  // Apply setup config changes only after all inputs have been validated.
   const workspace = await resolveWorkspace();
-  let reviewGate = false;
-
-  if (options["enable-review-gate"]) {
+  if (
+    reviewGateOverride !== undefined ||
+    reviewGateMaxPerSessionOverride !== undefined ||
+    reviewGateCooldownMinutesOverride !== undefined
+  ) {
     updateState(workspace, (state) => {
       state.config = state.config || {};
-      state.config.reviewGate = true;
-    });
-    reviewGate = true;
-  } else if (options["disable-review-gate"]) {
-    updateState(workspace, (state) => {
-      state.config = state.config || {};
-      state.config.reviewGate = false;
-    });
-    reviewGate = false;
-  } else {
-    const state = loadState(workspace);
-    reviewGate = state.config?.reviewGate ?? false;
-  }
-
-  if (options["review-gate-max"] != null) {
-    const raw = options["review-gate-max"];
-    const max = raw === "off" ? null : Number(raw);
-    if (max !== null && (!Number.isInteger(max) || max < 1)) {
-      console.error(`--review-gate-max must be a positive integer or "off".`);
-      process.exit(1);
-    }
-    updateState(workspace, (state) => {
-      state.config = state.config || {};
-      state.config.reviewGateMaxPerSession = max;
-    });
-  }
-
-  if (options["review-gate-cooldown"] != null) {
-    const raw = options["review-gate-cooldown"];
-    const cooldown = raw === "off" ? null : Number(raw);
-    if (cooldown !== null && (!Number.isInteger(cooldown) || cooldown < 1)) {
-      console.error(`--review-gate-cooldown must be a positive integer (minutes) or "off".`);
-      process.exit(1);
-    }
-    updateState(workspace, (state) => {
-      state.config = state.config || {};
-      state.config.reviewGateCooldownMinutes = cooldown;
+      if (reviewGateOverride !== undefined) {
+        state.config.reviewGate = reviewGateOverride;
+      }
+      if (reviewGateMaxPerSessionOverride !== undefined) {
+        state.config.reviewGateMaxPerSession = reviewGateMaxPerSessionOverride;
+      }
+      if (reviewGateCooldownMinutesOverride !== undefined) {
+        state.config.reviewGateCooldownMinutes = reviewGateCooldownMinutesOverride;
+      }
     });
   }
 
   const finalState = loadState(workspace);
+  const reviewGate = finalState.config?.reviewGate ?? false;
   const reviewGateMaxPerSession = finalState.config?.reviewGateMaxPerSession ?? null;
   const reviewGateCooldownMinutes = finalState.config?.reviewGateCooldownMinutes ?? null;
 
@@ -258,8 +263,8 @@ async function handleReview(argv) {
   });
 
   const prNumber = options.pr ? Number(options.pr) : null;
-  if (options.pr && !Number.isFinite(prNumber)) {
-    console.error(`Invalid --pr value: ${options.pr} (must be a number)`);
+  if (options.pr && (!Number.isFinite(prNumber) || prNumber <= 0)) {
+    console.error(`Invalid --pr value: ${options.pr} (must be a positive number)`);
     process.exit(1);
   }
 
@@ -350,8 +355,8 @@ async function handleAdversarialReview(argv) {
   let prNumber = null;
   if (options.pr) {
     prNumber = Number(options.pr);
-    if (!Number.isFinite(prNumber)) {
-      console.error(`Invalid --pr value: ${options.pr} (must be a number)`);
+    if (!Number.isFinite(prNumber) || prNumber <= 0) {
+      console.error(`Invalid --pr value: ${options.pr} (must be a positive number)`);
       process.exit(1);
     }
   } else {
@@ -515,6 +520,7 @@ async function handleTask(argv) {
   // Set up a worktree session if requested. Foreground mode only.
   let worktreeSession = null;
   let effectiveCwd = workspace;
+  let taskError = null;
   if (useWorktree) {
     try {
       worktreeSession = await createWorktreeSession(workspace);
@@ -536,8 +542,9 @@ async function handleTask(argv) {
   }
 
   // Foreground mode
+  let result;
   try {
-    const result = await runTrackedJob(workspace, job, async ({ report, log }) => {
+    result = await runTrackedJob(workspace, job, async ({ report, log }) => {
       report("starting", "Connecting to OpenCode server...");
       const client = await connect({ cwd: effectiveCwd });
 
@@ -581,8 +588,8 @@ async function handleTask(argv) {
           if (diff?.files) {
             changedFiles = diff.files.map((f) => f.path || f.name).filter(Boolean);
           }
-        } catch {
-          // diff endpoint may not be available
+        } catch (err) {
+          log(`Warning: could not retrieve diff - ${err.message}`);
         }
       }
 
@@ -617,16 +624,19 @@ async function handleTask(argv) {
 
     console.log(result.rendered);
   } catch (err) {
-    // On any failure with a worktree, clean it up so we don't leak dirs.
+    taskError = err;
+    // Don't clean up worktree here - let finally handle it
+    console.error(`Task failed: ${err.message}`);
+    process.exit(1);
+  } finally {
+    // Always clean up worktree on exit, whether success or failure
     if (worktreeSession) {
       try {
-        await cleanupWorktreeSession(worktreeSession, { keep: false });
+        await cleanupWorktreeSession(worktreeSession, { keep: taskError === null });
       } catch {
         // best-effort
       }
     }
-    console.error(`Task failed: ${err.message}`);
-    process.exit(1);
   }
 }
 
@@ -772,6 +782,28 @@ async function handleTaskWorker(argv) {
       process.exit(1);
     }
   }
+
+  let signalsHandled = false;
+  const handleSignal = async (signal) => {
+    if (signalsHandled) return;
+    signalsHandled = true;
+    upsertJob(workspace, {
+      id: jobId,
+      status: "failed",
+      completedAt: new Date().toISOString(),
+      errorMessage: `Worker terminated by ${signal}`,
+    });
+    if (worktreeSession) {
+      try {
+        await cleanupWorktreeSession(worktreeSession, { keep: false });
+      } catch {
+        // best-effort
+      }
+    }
+    process.exit(128 + (signal === "SIGINT" ? 2 : 15));
+  };
+  process.on("SIGINT", () => handleSignal("SIGINT"));
+  process.on("SIGTERM", () => handleSignal("SIGTERM"));
 
   try {
     await runTrackedJob(workspace, { id: jobId }, async ({ report, log }) => {
@@ -927,7 +959,7 @@ async function handleCancel(argv) {
   );
 
   if (ambiguous) {
-    console.error("Multiple running jobs. Please specify a job ID prefix.");
+    console.error("Multiple active jobs. Please specify a job ID prefix.");
     process.exit(1);
   }
 
@@ -999,7 +1031,12 @@ function saveLastReview(workspace, rendered) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
     fs.writeFileSync(tmp, rendered, "utf8");
-    fs.renameSync(tmp, file);
+    try {
+      fs.unlinkSync(file);
+    } catch (err) {
+      if (err?.code !== "ENOENT") throw err;
+    }
+    fs.copyFileSync(tmp, file);
     tmp = null;
   } catch {
     // best-effort

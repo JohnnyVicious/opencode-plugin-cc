@@ -225,12 +225,12 @@ export function resolveResultJob(jobs, ref) {
 }
 
 /**
- * Resolve a job that can be canceled (running).
+ * Resolve a job that can be canceled (any active/non-terminal state).
  *
  * When opts.sessionId is set, the default target (no ref) is restricted to
  * jobs from that session so `/opencode:cancel` doesn't reach across Claude
- * sessions and kill unrelated work. An explicit ref still searches all
- * running jobs — if the user names a job, they asked for it by name.
+ * sessions and kill unrelated work. An explicit ref still searches all active
+ * jobs — if the user names a job, they asked for it by name.
  *
  * @param {object[]} jobs
  * @param {string} [ref]
@@ -238,7 +238,7 @@ export function resolveResultJob(jobs, ref) {
  * @returns {{ job: object|null, ambiguous: boolean, sessionScoped?: boolean }}
  */
 export function resolveCancelableJob(jobs, ref, opts = {}) {
-  const running = jobs.filter((j) => j.status === "running");
+  const running = jobs.filter((j) => isActiveJobStatus(j.status));
   if (ref) {
     return matchJobReference(running, ref);
   }
