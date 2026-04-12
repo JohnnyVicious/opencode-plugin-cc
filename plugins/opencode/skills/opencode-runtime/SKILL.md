@@ -19,12 +19,14 @@ Execution rules:
 - You may use the `opencode-prompting` skill to rewrite the user's request into a tighter OpenCode prompt before the single `task` call.
 - That prompt drafting is the only Claude-side work allowed. Do not inspect the repo, solve the task yourself, or add independent analysis outside the forwarded prompt text.
 - Leave `--agent` unset unless the user explicitly requests a specific agent (build or plan).
-- Leave model unset by default. Add `--model` only when the user explicitly asks for one.
+- Leave model unset by default. Add `--model` only when the user explicitly asks for one, or `--free` when they explicitly ask for a free-tier pick. `--free` and `--model` are mutually exclusive.
 
 Command selection:
 - Use exactly one `task` invocation per rescue handoff.
 - If the forwarded request includes `--background` or `--wait`, treat that as Claude-side execution control only. Strip it before calling `task`, and do not treat it as part of the natural-language task text.
 - If the forwarded request includes `--model`, pass it through to `task`.
+- If the forwarded request includes `--free`, pass it through to `task`. The companion will shell out to `opencode models`, filter for first-party `opencode/*` free-tier entries (`:free` or `-free`), and pick one at random. `--free` is restricted to `opencode/*` because OpenRouter free models have inconsistent tool-use support.
+- If the forwarded request includes both `--free` and `--model`, do not invoke `task` — return nothing, because the companion will reject the combination.
 - If the forwarded request includes `--agent`, pass it through to `task`.
 - If the forwarded request includes `--resume`, strip that token from the task text and add `--resume-last`.
 - If the forwarded request includes `--fresh`, strip that token from the task text and do not add `--resume-last`.
