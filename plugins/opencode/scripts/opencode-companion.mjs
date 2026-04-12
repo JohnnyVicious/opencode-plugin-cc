@@ -549,8 +549,13 @@ async function handleCancel(argv) {
 
   const workspace = await resolveWorkspace();
   const state = loadState(workspace);
+  const sessionId = getClaudeSessionId();
 
-  const { job, ambiguous } = resolveCancelableJob(state.jobs ?? [], ref);
+  const { job, ambiguous, sessionScoped } = resolveCancelableJob(
+    state.jobs ?? [],
+    ref,
+    { sessionId }
+  );
 
   if (ambiguous) {
     console.error("Multiple running jobs. Please specify a job ID prefix.");
@@ -558,7 +563,11 @@ async function handleCancel(argv) {
   }
 
   if (!job) {
-    console.log("No active job to cancel.");
+    console.log(
+      sessionScoped
+        ? "No active OpenCode jobs to cancel for this session."
+        : "No active job to cancel."
+    );
     return;
   }
 
