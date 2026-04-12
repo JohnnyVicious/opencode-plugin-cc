@@ -235,6 +235,24 @@ export function stateRoot(workspacePath) {
     const primaryDir = path.join(pluginDataDir, "state", hash);
     const fallbackDir = path.join(FALLBACK_STATE_ROOT_DIR, hash);
     migrateTmpdirStateIfNeeded(fallbackDir, primaryDir);
+
+    // If migration did not complete — e.g. another process holds the
+    // `.migrate.lock`, the wait timed out, or the migrator crashed and
+    // left a fresh lock — and fallback state still exists while primary
+    // state does not, keep operating against the fallback directory.
+    // Otherwise loadState would return an empty state from the missing
+    // primary file and the next write would create `primary/state.json`
+    // with only the new entry, orphaning every existing fallback job.
+    // Future stateRoot calls will retry migration until it succeeds.
+    try {
+      const primaryStateExists = fs.existsSync(path.join(primaryDir, "state.json"));
+      const fallbackStateExists = fs.existsSync(path.join(fallbackDir, "state.json"));
+      if (!primaryStateExists && fallbackStateExists) {
+        return fallbackDir;
+      }
+    } catch {
+      // existsSync should not throw in normal use; be defensive.
+    }
     return primaryDir;
   }
 

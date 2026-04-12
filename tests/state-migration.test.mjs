@@ -137,8 +137,63 @@ describe("stateRoot tmpdir → plugin-data migration", () => {
     fs.symlinkSync("/etc/passwd", path.join(fallbackDir, "leak"));
 
     process.env.CLAUDE_PLUGIN_DATA = dataDir;
-    const primaryDir = stateRoot(workspace);
-    assert.equal(fs.existsSync(path.join(primaryDir, "state.json")), false);
+    // Migration must reject the symlink and leave the primary dir empty.
+    // We can't use stateRoot() here because the fallback-guard from issue
+    // P1 now routes reads back to fallbackDir on incomplete migration, so
+    // compute the expected primary path directly.
+    const hash = path.basename(fallbackDir); // workspaceHash
+    const expectedPrimaryDir = path.join(dataDir, "state", hash);
+    stateRoot(workspace); // triggers migration attempt
+    assert.equal(
+      fs.existsSync(path.join(expectedPrimaryDir, "state.json")),
+      false,
+      "symlink-containing migration should leave primary state empty"
+    );
+  });
+
+  it("keeps reading fallback state while migration lock is held", () => {
+    // Seed fallback state without CLAUDE_PLUGIN_DATA.
+    delete process.env.CLAUDE_PLUGIN_DATA;
+    upsertJob(workspace, { id: "pre-migration", status: "running", type: "task" });
+    const fallbackDir = stateRoot(workspace);
+    const fallbackState = path.join(fallbackDir, "state.json");
+    assert.ok(fs.existsSync(fallbackState));
+
+    // Switch to CLAUDE_PLUGIN_DATA and pre-create the migrate lock so
+    // migrateTmpdirStateIfNeeded bails out without copying anything.
+    // The lock path derives from primaryDir; compute it the same way
+    // stateRoot does.
+    process.env.CLAUDE_PLUGIN_DATA = dataDir;
+    const hash = path.basename(fallbackDir); // workspaceHash(workspace)
+    const primaryDir = path.join(dataDir, "state", hash);
+    const lockPath = `${primaryDir}.migrate.lock`;
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+    fs.writeFileSync(lockPath, "held by another process");
+
+    try {
+      // stateRoot must fall back to the tmpdir dir while the lock is
+      // held — otherwise loadState reads an empty primary and writes
+      // clobber the seeded job.
+      const root = stateRoot(workspace);
+      assert.equal(
+        root,
+        fallbackDir,
+        "expected fallback dir while migrate lock is held, got primary"
+      );
+
+      const loaded = loadState(workspace);
+      const job = loaded.jobs.find((j) => j.id === "pre-migration");
+      assert.ok(job, "seeded fallback job disappeared under held migrate lock");
+
+      // A write in this window should land in fallback without clobbering
+      // the existing job.
+      upsertJob(workspace, { id: "in-flight", status: "running", type: "task" });
+      const after = loadState(workspace);
+      assert.ok(after.jobs.find((j) => j.id === "pre-migration"), "pre-migration clobbered");
+      assert.ok(after.jobs.find((j) => j.id === "in-flight"), "in-flight write lost");
+    } finally {
+      fs.rmSync(lockPath, { force: true });
+    }
   });
 
   it("does not re-migrate when primary state already exists", () => {
