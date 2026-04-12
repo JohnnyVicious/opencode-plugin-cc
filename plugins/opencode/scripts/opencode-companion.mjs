@@ -101,6 +101,7 @@ handler(argv).catch((err) => {
 
 async function handleSetup(argv) {
   const { options } = parseArgs(argv, {
+    valueOptions: ["review-gate-max", "review-gate-cooldown"],
     booleanOptions: ["json", "enable-review-gate", "disable-review-gate"],
   });
 
@@ -143,7 +144,45 @@ async function handleSetup(argv) {
     reviewGate = state.config?.reviewGate ?? false;
   }
 
-  const status = { installed, version, serverRunning, providers, reviewGate };
+  if (options["review-gate-max"] != null) {
+    const raw = options["review-gate-max"];
+    const max = raw === "off" ? null : Number(raw);
+    if (max !== null && (!Number.isInteger(max) || max < 1)) {
+      console.error(`--review-gate-max must be a positive integer or "off".`);
+      process.exit(1);
+    }
+    updateState(workspace, (state) => {
+      state.config = state.config || {};
+      state.config.reviewGateMaxPerSession = max;
+    });
+  }
+
+  if (options["review-gate-cooldown"] != null) {
+    const raw = options["review-gate-cooldown"];
+    const cooldown = raw === "off" ? null : Number(raw);
+    if (cooldown !== null && (!Number.isInteger(cooldown) || cooldown < 1)) {
+      console.error(`--review-gate-cooldown must be a positive integer (minutes) or "off".`);
+      process.exit(1);
+    }
+    updateState(workspace, (state) => {
+      state.config = state.config || {};
+      state.config.reviewGateCooldownMinutes = cooldown;
+    });
+  }
+
+  const finalState = loadState(workspace);
+  const reviewGateMaxPerSession = finalState.config?.reviewGateMaxPerSession ?? null;
+  const reviewGateCooldownMinutes = finalState.config?.reviewGateCooldownMinutes ?? null;
+
+  const status = {
+    installed,
+    version,
+    serverRunning,
+    providers,
+    reviewGate,
+    reviewGateMaxPerSession,
+    reviewGateCooldownMinutes,
+  };
 
   if (options.json) {
     console.log(JSON.stringify(status, null, 2));

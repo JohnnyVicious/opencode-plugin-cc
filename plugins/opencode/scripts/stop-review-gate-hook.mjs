@@ -8,11 +8,37 @@ import process from "node:process";
 import fs from "node:fs";
 import path from "node:path";
 import { resolveWorkspace } from "./lib/workspace.mjs";
-import { loadState } from "./lib/state.mjs";
+import { loadState, updateState } from "./lib/state.mjs";
 import { isServerRunning, connect } from "./lib/opencode-server.mjs";
 import { resolveReviewAgent } from "./lib/review-agent.mjs";
 
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(import.meta.dirname, "..");
+
+function currentSessionId() {
+  return (
+    process.env.OPENCODE_COMPANION_SESSION_ID ||
+    process.env.CLAUDE_SESSION_ID ||
+    null
+  );
+}
+
+/**
+ * Prune review-gate usage entries older than 7 days so long-lived workspace
+ * state doesn't grow unbounded across many Claude sessions.
+ */
+function pruneOldUsage(usage) {
+  if (!usage || typeof usage !== "object") return {};
+  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const kept = {};
+  for (const [sid, entry] of Object.entries(usage)) {
+    if (!entry?.lastRunAt) continue;
+    const ts = new Date(entry.lastRunAt).getTime();
+    if (Number.isFinite(ts) && ts >= cutoff) {
+      kept[sid] = entry;
+    }
+  }
+  return kept;
+}
 
 async function main() {
   const workspace = await resolveWorkspace();
@@ -23,6 +49,27 @@ async function main() {
     // Gate is disabled, allow stop
     console.log("ALLOW: Review gate is disabled.");
     return;
+  }
+
+  // Throttle check — honor per-session cap and cooldown if configured.
+  // Skipped when no session id is available (can't scope the limit safely).
+  const sessionId = currentSessionId();
+  if (sessionId) {
+    const usage = state.reviewGateUsage?.[sessionId] ?? { count: 0, lastRunAt: null };
+    const max = state.config.reviewGateMaxPerSession;
+    if (Number.isFinite(max) && usage.count >= max) {
+      console.log(`ALLOW: Review gate session cap (${max}) reached.`);
+      return;
+    }
+    const cooldownMin = state.config.reviewGateCooldownMinutes;
+    if (Number.isFinite(cooldownMin) && usage.lastRunAt) {
+      const elapsedMs = Date.now() - new Date(usage.lastRunAt).getTime();
+      if (Number.isFinite(elapsedMs) && elapsedMs < cooldownMin * 60 * 1000) {
+        const remaining = Math.ceil((cooldownMin * 60 * 1000 - elapsedMs) / 1000);
+        console.log(`ALLOW: Review gate cooldown (${remaining}s remaining).`);
+        return;
+      }
+    }
   }
 
   // Check if server is available
@@ -74,6 +121,20 @@ async function main() {
     // Extract the verdict
     const text = extractText(response);
     const firstLine = text.trim().split("\n")[0];
+
+    // Bump usage before returning a verdict so the count reflects work
+    // actually done, even if the verdict BLOCKs.
+    if (sessionId) {
+      const nowIso = new Date().toISOString();
+      updateState(workspace, (s) => {
+        s.reviewGateUsage = pruneOldUsage(s.reviewGateUsage);
+        const prior = s.reviewGateUsage[sessionId] ?? { count: 0, lastRunAt: null };
+        s.reviewGateUsage[sessionId] = {
+          count: prior.count + 1,
+          lastRunAt: nowIso,
+        };
+      });
+    }
 
     if (firstLine.startsWith("BLOCK")) {
       // Output BLOCK to stderr so Claude Code sees it
