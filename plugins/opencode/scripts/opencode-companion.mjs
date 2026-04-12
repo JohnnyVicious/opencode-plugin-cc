@@ -58,6 +58,11 @@ import {
 } from "./lib/render.mjs";
 import { buildReviewPrompt, buildTaskPrompt } from "./lib/prompts.mjs";
 import { getDiff, getStatus as getGitStatus, detectPrReference } from "./lib/git.mjs";
+import {
+  createWorktreeSession,
+  diffWorktreeSession,
+  cleanupWorktreeSession,
+} from "./lib/worktree.mjs";
 import { readJson } from "./lib/fs.mjs";
 import { resolveReviewAgent } from "./lib/review-agent.mjs";
 import { parseModelString } from "./lib/model.mjs";
@@ -78,6 +83,7 @@ const handlers = {
   "task-worker": handleTaskWorker,
   "task-resume-candidate": handleTaskResumeCandidate,
   "last-review": handleLastReview,
+  "worktree-cleanup": handleWorktreeCleanup,
   status: handleStatus,
   result: handleResult,
   cancel: handleCancel,
@@ -355,11 +361,11 @@ async function handleAdversarialReview(argv) {
 async function handleTask(argv) {
   const { options, positional } = parseArgs(argv, {
     valueOptions: ["model", "agent"],
-    booleanOptions: ["write", "background", "wait", "resume-last", "fresh"],
+    booleanOptions: ["write", "background", "wait", "resume-last", "fresh", "worktree"],
   });
 
   const taskText = extractTaskText(argv, ["model", "agent"], [
-    "write", "background", "wait", "resume-last", "fresh",
+    "write", "background", "wait", "resume-last", "fresh", "worktree",
   ]);
 
   if (!taskText) {
@@ -370,6 +376,12 @@ async function handleTask(argv) {
   const workspace = await resolveWorkspace();
   const isWrite = options.write !== undefined ? options.write : true;
   const agentName = options.agent ?? (isWrite ? "build" : "plan");
+  const useWorktree = Boolean(options.worktree);
+
+  if (useWorktree && !isWrite) {
+    console.error("--worktree requires --write (nothing to isolate in read-only mode).");
+    process.exit(1);
+  }
 
   // Check for resume
   let resumeSessionId = null;
@@ -389,6 +401,7 @@ async function handleTask(argv) {
   const job = createJobRecord(workspace, "task", {
     agent: agentName,
     resumeSessionId,
+    worktree: useWorktree,
   });
 
   // Background mode: spawn a detached worker
@@ -402,6 +415,7 @@ async function handleTask(argv) {
       "--agent", agentName,
     ];
     if (isWrite) workerArgs.push("--write");
+    if (useWorktree) workerArgs.push("--worktree");
     if (resumeSessionId) workerArgs.push("--resume-session", resumeSessionId);
     if (options.model) workerArgs.push("--model", options.model);
 
@@ -411,11 +425,34 @@ async function handleTask(argv) {
     return;
   }
 
+  // Set up a worktree session if requested. Foreground mode only.
+  let worktreeSession = null;
+  let effectiveCwd = workspace;
+  if (useWorktree) {
+    try {
+      worktreeSession = await createWorktreeSession(workspace);
+      effectiveCwd = worktreeSession.worktreePath;
+      upsertJob(workspace, {
+        id: job.id,
+        worktreeSession: {
+          worktreePath: worktreeSession.worktreePath,
+          branch: worktreeSession.branch,
+          repoRoot: worktreeSession.repoRoot,
+          baseCommit: worktreeSession.baseCommit,
+          timestamp: worktreeSession.timestamp,
+        },
+      });
+    } catch (err) {
+      console.error(`Failed to create worktree: ${err.message}`);
+      process.exit(1);
+    }
+  }
+
   // Foreground mode
   try {
     const result = await runTrackedJob(workspace, job, async ({ report, log }) => {
       report("starting", "Connecting to OpenCode server...");
-      const client = await connect({ cwd: workspace });
+      const client = await connect({ cwd: effectiveCwd });
 
       let sessionId;
       if (resumeSessionId) {
@@ -431,7 +468,11 @@ async function handleTask(argv) {
       const prompt = buildTaskPrompt(taskText, { write: isWrite });
 
       report("investigating", "Sending task to OpenCode...");
-      log(`Agent: ${agentName}, Write: ${isWrite}, Prompt: ${prompt.length} chars`);
+      log(
+        `Agent: ${agentName}, Write: ${isWrite}, ` +
+          `Worktree: ${useWorktree ? worktreeSession.branch : "no"}, ` +
+          `Prompt: ${prompt.length} chars`
+      );
 
       const response = await client.sendPrompt(sessionId, prompt, {
         agent: agentName,
@@ -454,19 +495,137 @@ async function handleTask(argv) {
         }
       }
 
+      // If using a worktree, compute the actual git diff stat produced on
+      // disk. This is what the user will have to keep or discard.
+      let worktreeDiff = null;
+      if (worktreeSession) {
+        try {
+          worktreeDiff = await diffWorktreeSession(worktreeSession);
+        } catch (err) {
+          log(`Failed to compute worktree diff: ${err.message}`);
+        }
+      }
+
       return {
-        rendered: text,
+        rendered: worktreeSession
+          ? renderWorktreeTaskOutput(text, worktreeSession, worktreeDiff, job.id)
+          : text,
         messages: response,
         changedFiles,
         summary: text.slice(0, 500),
+        worktreeSession: worktreeSession
+          ? {
+              worktreePath: worktreeSession.worktreePath,
+              branch: worktreeSession.branch,
+              repoRoot: worktreeSession.repoRoot,
+              baseCommit: worktreeSession.baseCommit,
+            }
+          : null,
       };
     });
 
     console.log(result.rendered);
   } catch (err) {
+    // On any failure with a worktree, clean it up so we don't leak dirs.
+    if (worktreeSession) {
+      try {
+        await cleanupWorktreeSession(worktreeSession, { keep: false });
+      } catch {
+        // best-effort
+      }
+    }
     console.error(`Task failed: ${err.message}`);
     process.exit(1);
   }
+}
+
+function renderWorktreeTaskOutput(text, session, diff, jobId) {
+  const lines = [];
+  if (text) {
+    lines.push(text.trimEnd());
+    lines.push("");
+  }
+  lines.push("---");
+  lines.push("");
+  lines.push("## Worktree");
+  lines.push("");
+  lines.push(`Branch: \`${session.branch}\``);
+  lines.push(`Path: \`${session.worktreePath}\``);
+  lines.push("");
+  if (diff?.stat) {
+    lines.push("### Changes");
+    lines.push("");
+    lines.push("```");
+    lines.push(diff.stat);
+    lines.push("```");
+    lines.push("");
+  } else {
+    lines.push("OpenCode made no file changes in the worktree.");
+    lines.push("");
+  }
+  lines.push("### Next steps");
+  lines.push("");
+  lines.push(`- **Keep**: \`node "\${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" worktree-cleanup ${jobId} --action keep\``);
+  lines.push(`- **Discard**: \`node "\${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" worktree-cleanup ${jobId} --action discard\``);
+  return lines.join("\n");
+}
+
+async function handleWorktreeCleanup(argv) {
+  const { options, positional } = parseArgs(argv, {
+    valueOptions: ["action"],
+    booleanOptions: ["json"],
+  });
+
+  const jobId = positional[0];
+  if (!jobId) {
+    console.error("Usage: worktree-cleanup <job-id> --action <keep|discard>");
+    process.exit(1);
+  }
+  const action = options.action;
+  if (action !== "keep" && action !== "discard") {
+    console.error("--action must be 'keep' or 'discard'.");
+    process.exit(1);
+  }
+
+  const workspace = await resolveWorkspace();
+  const state = loadState(workspace);
+  const job = state.jobs?.find((j) => j.id === jobId || j.id.startsWith(jobId));
+  if (!job) {
+    console.error(`No job found for ${jobId}.`);
+    process.exit(1);
+  }
+
+  const session = job.worktreeSession;
+  if (!session?.worktreePath || !session?.branch || !session?.repoRoot) {
+    console.error(`Job ${jobId} has no worktree session. Was it run with --worktree?`);
+    process.exit(1);
+  }
+
+  const result = await cleanupWorktreeSession(session, { keep: action === "keep" });
+
+  if (options.json) {
+    console.log(JSON.stringify({ jobId: job.id, action, result }, null, 2));
+    return;
+  }
+
+  const lines = ["# Worktree Cleanup", ""];
+  if (action === "keep") {
+    if (result.applied) {
+      lines.push(`Applied changes from \`${session.branch}\` and cleaned up.`);
+    } else if (result.detail === "No changes to apply.") {
+      lines.push(`No changes to apply. Worktree and branch \`${session.branch}\` cleaned up.`);
+    } else {
+      lines.push(`Failed to apply changes: ${result.detail}`);
+      lines.push("");
+      lines.push(
+        `The worktree and branch \`${session.branch}\` have been preserved at ` +
+          `\`${session.worktreePath}\` for manual recovery.`
+      );
+    }
+  } else {
+    lines.push(`Discarded worktree \`${session.worktreePath}\` and branch \`${session.branch}\`.`);
+  }
+  console.log(lines.join("\n"));
 }
 
 async function handleTaskWorker(argv) {

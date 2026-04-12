@@ -5,6 +5,8 @@
 // `gh` instead of only local working-tree state. (Apache License 2.0 §4(b)
 // modification notice.)
 
+import fs from "node:fs";
+import path from "node:path";
 import { runCommand } from "./process.mjs";
 
 /**
@@ -188,4 +190,139 @@ export async function getPrDiff(cwd, prNumber) {
     throw new Error(`gh pr diff ${prNumber} failed: ${stderr.trim() || "unknown error"}`);
   }
   return stdout;
+}
+
+// ------------------------------------------------------------------
+// Worktree helpers (for --worktree isolated rescue runs)
+// ------------------------------------------------------------------
+
+/**
+ * Create a disposable git worktree under `<repoRoot>/.worktrees/opencode-<ts>`
+ * on a new `opencode/<ts>` branch. Also adds `.worktrees/` to the repo's
+ * `.git/info/exclude` so the directory never shows up in `git status`.
+ *
+ * @param {string} repoRoot
+ * @returns {Promise<{ worktreePath: string, branch: string, repoRoot: string, baseCommit: string, timestamp: number }>}
+ */
+export async function createWorktree(repoRoot) {
+  const ts = Date.now();
+  const worktreesDir = path.join(repoRoot, ".worktrees");
+  fs.mkdirSync(worktreesDir, { recursive: true });
+
+  // Resolve the real git dir (handles linked worktrees where .git is a file).
+  const gitDirResult = await runCommand("git", ["rev-parse", "--git-dir"], { cwd: repoRoot });
+  const rawGitDir = gitDirResult.stdout.trim();
+  const gitDir = path.resolve(repoRoot, rawGitDir);
+  const excludePath = path.join(gitDir, "info", "exclude");
+  const existing = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, "utf8") : "";
+  if (!existing.includes(".worktrees")) {
+    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+    const sep = existing.length === 0 || existing.endsWith("\n") ? "" : "\n";
+    fs.appendFileSync(excludePath, `${sep}.worktrees/\n`);
+  }
+
+  const worktreePath = path.join(worktreesDir, `opencode-${ts}`);
+  const branch = `opencode/${ts}`;
+  const baseCommitResult = await runCommand("git", ["rev-parse", "HEAD"], { cwd: repoRoot });
+  if (baseCommitResult.exitCode !== 0) {
+    throw new Error(`git rev-parse HEAD failed: ${baseCommitResult.stderr.trim()}`);
+  }
+  const baseCommit = baseCommitResult.stdout.trim();
+
+  const addResult = await runCommand(
+    "git",
+    ["worktree", "add", worktreePath, "-b", branch],
+    { cwd: repoRoot }
+  );
+  if (addResult.exitCode !== 0) {
+    throw new Error(`git worktree add failed: ${addResult.stderr.trim()}`);
+  }
+
+  return { worktreePath, branch, repoRoot, baseCommit, timestamp: ts };
+}
+
+/**
+ * Remove a worktree (force). Swallows "not a working tree" so callers can
+ * safely retry cleanup.
+ * @param {string} repoRoot
+ * @param {string} worktreePath
+ */
+export async function removeWorktree(repoRoot, worktreePath) {
+  const { exitCode, stderr } = await runCommand(
+    "git",
+    ["worktree", "remove", "--force", worktreePath],
+    { cwd: repoRoot }
+  );
+  if (exitCode !== 0 && !stderr.includes("is not a working tree")) {
+    throw new Error(`git worktree remove failed: ${stderr.trim()}`);
+  }
+}
+
+/**
+ * Delete a branch (force). Failures are swallowed — this is best-effort
+ * cleanup after the worktree has already been removed.
+ */
+export async function deleteWorktreeBranch(repoRoot, branch) {
+  await runCommand("git", ["branch", "-D", branch], { cwd: repoRoot });
+}
+
+/**
+ * Compute the diff the worktree made on top of the base commit. Stages
+ * everything first so uncommitted edits (which is what OpenCode actually
+ * produces) show up in the diff.
+ * @returns {Promise<{ stat: string, patch: string }>}
+ */
+export async function getWorktreeDiff(worktreePath, baseCommit) {
+  await runCommand("git", ["add", "-A"], { cwd: worktreePath });
+  const statR = await runCommand(
+    "git",
+    ["diff", "--cached", baseCommit, "--stat"],
+    { cwd: worktreePath }
+  );
+  if (statR.exitCode !== 0 || !statR.stdout.trim()) {
+    return { stat: "", patch: "" };
+  }
+  const patchR = await runCommand(
+    "git",
+    ["diff", "--cached", baseCommit],
+    { cwd: worktreePath }
+  );
+  return { stat: statR.stdout.trim(), patch: patchR.stdout };
+}
+
+/**
+ * Apply the worktree diff back to `repoRoot` as a staged patch. Returns
+ * `{ applied, detail }` — detail includes any git error when apply fails.
+ */
+export async function applyWorktreePatch(repoRoot, worktreePath, baseCommit) {
+  await runCommand("git", ["add", "-A"], { cwd: worktreePath });
+  const patchR = await runCommand(
+    "git",
+    ["diff", "--cached", baseCommit],
+    { cwd: worktreePath }
+  );
+  if (patchR.exitCode !== 0 || !patchR.stdout.trim()) {
+    return { applied: false, detail: "No changes to apply." };
+  }
+  const patchPath = path.join(
+    repoRoot,
+    `.opencode-worktree-${Date.now()}-${Math.random().toString(16).slice(2)}.patch`
+  );
+  try {
+    fs.writeFileSync(patchPath, patchR.stdout, "utf8");
+    const applyR = await runCommand(
+      "git",
+      ["apply", "--index", patchPath],
+      { cwd: repoRoot }
+    );
+    if (applyR.exitCode !== 0) {
+      return {
+        applied: false,
+        detail: applyR.stderr.trim() || "Patch apply failed (conflicts?).",
+      };
+    }
+    return { applied: true, detail: "Changes applied and staged." };
+  } finally {
+    fs.rmSync(patchPath, { force: true });
+  }
 }

@@ -29,6 +29,7 @@ Forwarding rules:
 - Leave `--agent` unset unless the user explicitly requests a specific agent (build or plan).
 - Leave model unset by default. Only add `--model` when the user explicitly asks for a specific model.
 - Treat `--agent <value>` and `--model <value>` as runtime controls and do not include them in the task text you pass through.
+- If the request includes `--worktree`, pass `--worktree` through to `task`. This runs OpenCode in an isolated git worktree instead of editing the working directory in-place.
 - Default to a write-capable OpenCode run by adding `--write` unless the user explicitly asks for read-only behavior or only wants review, diagnosis, or research without edits.
 - Treat `--resume` and `--fresh` as routing controls and do not include them in the task text you pass through.
 - `--resume` means add `--resume-last`.
