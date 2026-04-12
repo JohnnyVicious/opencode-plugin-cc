@@ -1,6 +1,13 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { renderStatus, renderResult, renderReview, renderSetup } from "../plugins/opencode/scripts/lib/render.mjs";
+import {
+  renderStatus,
+  renderResult,
+  renderReview,
+  renderSetup,
+  extractResponseModel,
+  formatModelHeader,
+} from "../plugins/opencode/scripts/lib/render.mjs";
 
 describe("renderStatus", () => {
   it("renders empty state", () => {
@@ -78,5 +85,76 @@ describe("renderResult", () => {
       null
     );
     assert.ok(output.includes("Connection timeout"));
+  });
+});
+
+describe("extractResponseModel", () => {
+  it("returns providerID/modelID for a well-formed response", () => {
+    const r = {
+      info: { model: { providerID: "openrouter", modelID: "minimax/minimax-m2.5:free" } },
+      parts: [],
+    };
+    assert.deepEqual(extractResponseModel(r), {
+      providerID: "openrouter",
+      modelID: "minimax/minimax-m2.5:free",
+    });
+  });
+
+  it("returns null when info is missing", () => {
+    assert.equal(extractResponseModel({ parts: [] }), null);
+  });
+
+  it("returns null when info.model is missing", () => {
+    assert.equal(extractResponseModel({ info: { role: "assistant" } }), null);
+  });
+
+  it("returns null when providerID is missing", () => {
+    assert.equal(extractResponseModel({ info: { model: { modelID: "x" } } }), null);
+  });
+
+  it("returns null when modelID is missing", () => {
+    assert.equal(extractResponseModel({ info: { model: { providerID: "x" } } }), null);
+  });
+
+  it("returns null when providerID/modelID are empty strings", () => {
+    assert.equal(
+      extractResponseModel({ info: { model: { providerID: "", modelID: "" } } }),
+      null
+    );
+  });
+
+  it("returns null when providerID/modelID are not strings", () => {
+    assert.equal(
+      extractResponseModel({ info: { model: { providerID: 1, modelID: 2 } } }),
+      null
+    );
+  });
+
+  it("returns null for null/undefined input", () => {
+    assert.equal(extractResponseModel(null), null);
+    assert.equal(extractResponseModel(undefined), null);
+  });
+});
+
+describe("formatModelHeader", () => {
+  it("formats a model as a markdown header", () => {
+    const out = formatModelHeader({
+      providerID: "openrouter",
+      modelID: "minimax/minimax-m2.5:free",
+    });
+    assert.equal(out, "**Model:** `openrouter/minimax/minimax-m2.5:free`\n\n");
+  });
+
+  it("returns empty string when model is null", () => {
+    assert.equal(formatModelHeader(null), "");
+  });
+
+  it("returns empty string when model is undefined", () => {
+    assert.equal(formatModelHeader(undefined), "");
+  });
+
+  it("output ends with a blank line so it can be safely concatenated", () => {
+    const header = formatModelHeader({ providerID: "x", modelID: "y" });
+    assert.ok(header.endsWith("\n\n"), "expected trailing blank line");
   });
 });

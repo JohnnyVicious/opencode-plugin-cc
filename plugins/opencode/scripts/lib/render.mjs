@@ -1,4 +1,9 @@
 // Output rendering for the OpenCode companion.
+//
+// Modified by JohnnyVicious (2026): added `extractResponseModel` and
+// `formatModelHeader` so review output always shows which model OpenCode
+// used to generate it. (Apache License 2.0 §4(b) modification notice —
+// see NOTICE.)
 
 /**
  * Render a status snapshot as human-readable text.
@@ -150,6 +155,35 @@ function extractMessageText(msg) {
       .join("\n");
   }
   return JSON.stringify(msg);
+}
+
+/**
+ * Extract the model that OpenCode used to generate a response. The
+ * shape is `{ info: { model: { providerID, modelID } } }` for messages
+ * coming from `POST /session/{id}/message` and `GET /session/{id}/message`.
+ * Returns null if the response is missing or malformed (e.g. error
+ * envelopes, the schema-dump bug we hit on `GET /provider`).
+ * @param {any} response
+ * @returns {{ providerID: string, modelID: string } | null}
+ */
+export function extractResponseModel(response) {
+  const model = response?.info?.model;
+  if (!model) return null;
+  if (typeof model.providerID !== "string" || typeof model.modelID !== "string") return null;
+  if (!model.providerID || !model.modelID) return null;
+  return { providerID: model.providerID, modelID: model.modelID };
+}
+
+/**
+ * Format a model object as a markdown header for prepending to review
+ * output. Returns an empty string when the model is unknown so callers
+ * can unconditionally concatenate it.
+ * @param {{ providerID: string, modelID: string } | null} model
+ * @returns {string}
+ */
+export function formatModelHeader(model) {
+  if (!model) return "";
+  return `**Model:** \`${model.providerID}/${model.modelID}\`\n\n`;
 }
 
 /**
