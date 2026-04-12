@@ -8,7 +8,7 @@ allowed-tools: Bash(node:*)
 Run the cancel command and return output verbatim.
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" cancel $ARGUMENTS
+node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" cancel "$ARGUMENTS"
 ```
 
 - Return the command stdout verbatim, exactly as-is.
