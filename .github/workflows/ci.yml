@@ -44,10 +44,13 @@ jobs:
       - name: Syntax-check companion scripts
         run: |
           node --check plugins/opencode/scripts/opencode-companion.mjs
+          node --check plugins/opencode/scripts/stop-review-gate-hook.mjs
           node --check plugins/opencode/scripts/lib/git.mjs
           node --check plugins/opencode/scripts/lib/prompts.mjs
           node --check plugins/opencode/scripts/lib/process.mjs
           node --check plugins/opencode/scripts/lib/opencode-server.mjs
+          node --check plugins/opencode/scripts/lib/review-agent.mjs
+          node --check plugins/opencode/scripts/lib/model.mjs
           node --check scripts/bump-version.mjs
 
       - name: Run tests
