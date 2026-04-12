@@ -35,12 +35,12 @@ function waitForMigration(primaryState) {
 }
 
 function acquireFallbackLock(fallbackDir) {
-  const lockPath = path.join(fallbackDir, ".migration.lock");
-  ensureDir(fallbackDir);
+  const lockPath = `${fallbackDir}.migration.lock`;
+  ensureDir(path.dirname(lockPath));
   const deadline = Date.now() + FALLBACK_LOCK_STALE_MS;
   while (true) {
     try {
-      return fs.openSync(lockPath, "wx");
+      return { fd: fs.openSync(lockPath, "wx"), lockPath };
     } catch (err) {
       if (err?.code !== "EEXIST") throw err;
       try {
@@ -58,11 +58,12 @@ function acquireFallbackLock(fallbackDir) {
   }
 }
 
-function releaseFallbackLock(fd, lockPath) {
-  if (fd != null) {
-    try { fs.closeSync(fd); } catch {}
+function releaseFallbackLock(lock) {
+  if (!lock) return;
+  if (lock.fd != null) {
+    try { fs.closeSync(lock.fd); } catch {}
   }
-  try { fs.rmSync(lockPath, { force: true }); } catch {}
+  try { fs.rmSync(lock.lockPath, { force: true }); } catch {}
 }
 
 function acquireMigrationLock(lockPath, primaryState) {
@@ -181,14 +182,14 @@ function migrateTmpdirStateIfNeeded(fallbackDir, primaryDir) {
   const lockPath = `${primaryDir}.migrate.lock`;
   const stageDir = `${primaryDir}.migrate-${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
   let lockFd = null;
-  let fallbackLockFd = null;
+  let fallbackLock = null;
   try {
     lockFd = acquireMigrationLock(lockPath, primaryState);
     if (lockFd === null) return;
     if (fs.existsSync(primaryState) || !fs.existsSync(fallbackState)) return;
 
-    fallbackLockFd = acquireFallbackLock(fallbackDir);
-    if (fallbackLockFd === null) return;
+    fallbackLock = acquireFallbackLock(fallbackDir);
+    if (fallbackLock === null) return;
 
     assertSafeMigrationTree(fallbackDir);
     fs.rmSync(stageDir, { recursive: true, force: true });
@@ -217,9 +218,7 @@ function migrateTmpdirStateIfNeeded(fallbackDir, primaryDir) {
       }
       fs.rmSync(lockPath, { force: true });
     }
-    if (fallbackLockFd !== null) {
-      releaseFallbackLock(fallbackLockFd, path.join(fallbackDir, ".migration.lock"));
-    }
+    releaseFallbackLock(fallbackLock);
   }
 }
 
@@ -311,12 +310,16 @@ function releaseStateLock(lock) {
   try {
     fs.rmSync(lock.lockPath, { force: true });
     const dirPath = path.dirname(lock.lockPath);
+    let dirFd = null;
     try {
-      const dirFd = fs.openSync(dirPath, "r");
+      dirFd = fs.openSync(dirPath, "r");
       fs.fsyncSync(dirFd);
-      fs.closeSync(dirFd);
     } catch {
       // fsync best-effort
+    } finally {
+      if (dirFd !== null) {
+        try { fs.closeSync(dirFd); } catch {}
+      }
     }
   } catch {}
 }

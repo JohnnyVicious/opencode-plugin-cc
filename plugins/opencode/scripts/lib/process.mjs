@@ -36,7 +36,7 @@ export function platformShellOption() {
  * @returns {Promise<string|null>}
  */
 export async function resolveOpencodeBinary() {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const isWin = process.platform === "win32";
     const locator = isWin ? "where" : "which";
     const proc = spawn(locator, ["opencode"], {
@@ -46,7 +46,7 @@ export async function resolveOpencodeBinary() {
     });
     let out = "";
     proc.stdout.on("data", (d) => (out += d));
-    proc.on("error", (err) => reject(err));
+    proc.on("error", () => resolve(null));
     proc.on("close", (code) => {
       if (code !== 0) return resolve(null);
       // `where` returns all matches separated by CRLF; pick the first.

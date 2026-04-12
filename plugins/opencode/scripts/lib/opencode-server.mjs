@@ -20,6 +20,7 @@
 // (Apache License 2.0 §4(b) modification notice — see NOTICE.)
 
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { platformShellOption } from "./process.mjs";
 

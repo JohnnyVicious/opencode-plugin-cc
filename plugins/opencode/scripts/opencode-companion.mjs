@@ -520,7 +520,6 @@ async function handleTask(argv) {
   // Set up a worktree session if requested. Foreground mode only.
   let worktreeSession = null;
   let effectiveCwd = workspace;
-  let taskError = null;
   if (useWorktree) {
     try {
       worktreeSession = await createWorktreeSession(workspace);
@@ -542,9 +541,8 @@ async function handleTask(argv) {
   }
 
   // Foreground mode
-  let result;
   try {
-    result = await runTrackedJob(workspace, job, async ({ report, log }) => {
+    const result = await runTrackedJob(workspace, job, async ({ report, log }) => {
       report("starting", "Connecting to OpenCode server...");
       const client = await connect({ cwd: effectiveCwd });
 
@@ -624,19 +622,16 @@ async function handleTask(argv) {
 
     console.log(result.rendered);
   } catch (err) {
-    taskError = err;
-    // Don't clean up worktree here - let finally handle it
-    console.error(`Task failed: ${err.message}`);
-    process.exit(1);
-  } finally {
-    // Always clean up worktree on exit, whether success or failure
+    // On any failure with a worktree, clean it up so we don't leak dirs.
     if (worktreeSession) {
       try {
-        await cleanupWorktreeSession(worktreeSession, { keep: taskError === null });
+        await cleanupWorktreeSession(worktreeSession, { keep: false });
       } catch {
         // best-effort
       }
     }
+    console.error(`Task failed: ${err.message}`);
+    process.exit(1);
   }
 }
 
@@ -1031,12 +1026,7 @@ function saveLastReview(workspace, rendered) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
     fs.writeFileSync(tmp, rendered, "utf8");
-    try {
-      fs.unlinkSync(file);
-    } catch (err) {
-      if (err?.code !== "ENOENT") throw err;
-    }
-    fs.copyFileSync(tmp, file);
+    fs.renameSync(tmp, file);
     tmp = null;
   } catch {
     // best-effort
