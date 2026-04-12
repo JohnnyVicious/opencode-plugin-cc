@@ -93,7 +93,6 @@ export async function runTrackedJob(workspacePath, job, runner, options = {}) {
         )
       );
     }, timeoutMs);
-    timeoutHandle.unref?.();
   });
 
   const clearTimer = () => {
