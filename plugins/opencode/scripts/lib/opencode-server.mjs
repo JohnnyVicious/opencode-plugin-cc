@@ -32,7 +32,8 @@ const SERVER_START_TIMEOUT = 30_000;
 const SERVER_REAP_IDLE_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
 function serverStatePath(workspacePath) {
-  const hash = crypto.createHash("sha256").update(workspacePath).digest("hex").slice(0, 16);
+  const key = typeof workspacePath === "string" && workspacePath.length > 0 ? workspacePath : process.cwd();
+  const hash = crypto.createHash("sha256").update(key).digest("hex").slice(0, 16);
   const pluginDataDir = process.env.CLAUDE_PLUGIN_DATA || path.join(os.tmpdir(), "opencode-companion");
   return path.join(pluginDataDir, "state", hash, "server.json");
 }
@@ -112,10 +113,16 @@ export async function ensureServer(opts = {}) {
   const url = `http://${host}:${port}`;
 
   if (await isServerRunning(host, port)) {
+    // A server is already on the port. Only clear tracked state if the
+    // tracked pid is dead (stale from a prior run) — otherwise it may be
+    // a plugin-owned server from a previous session that reapServerIfOurs
+    // should still be able to identify on SessionEnd.
     const state = loadServerState(opts.cwd);
-    delete state.lastServerPid;
-    delete state.lastServerStartedAt;
-    saveServerState(opts.cwd, state);
+    if (state.lastServerPid && !isProcessAlive(state.lastServerPid)) {
+      delete state.lastServerPid;
+      delete state.lastServerStartedAt;
+      saveServerState(opts.cwd, state);
+    }
     return { url, alreadyRunning: true };
   }
 
@@ -155,7 +162,9 @@ export async function ensureServer(opts = {}) {
   });
   proc.unref();
 
-  // Wait for the server to become ready
+  // Wait for the server to become ready. Poll every 250ms rather than
+  // spinning hot — a tight loop would hammer fetch() and burn CPU for up
+  // to SERVER_START_TIMEOUT.
   const deadline = Date.now() + SERVER_START_TIMEOUT;
   while (Date.now() < deadline) {
     if (spawnError) {
@@ -168,8 +177,13 @@ export async function ensureServer(opts = {}) {
       throw new Error(`OpenCode server process exited before becoming ready (${detail}).`);
     }
     if (await isServerRunning(host, port)) {
-      return { url, alreadyRunning: true };
+      const state = loadServerState(opts.cwd);
+      state.lastServerPid = proc.pid;
+      state.lastServerStartedAt = Date.now();
+      saveServerState(opts.cwd, state);
+      return { url, alreadyRunning: false, pid: proc.pid };
     }
+    await new Promise((r) => setTimeout(r, 250));
   }
 
   throw new Error(`OpenCode server failed to start within ${SERVER_START_TIMEOUT / 1000}s`);

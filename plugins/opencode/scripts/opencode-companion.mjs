@@ -81,7 +81,7 @@ import {
   diffWorktreeSession,
   cleanupWorktreeSession,
 } from "./lib/worktree.mjs";
-import { readJson, readDenyRules, denyRulesApplyToPath } from "./lib/fs.mjs";
+import { readJson, readDenyRules } from "./lib/fs.mjs";
 import { resolveReviewAgent } from "./lib/review-agent.mjs";
 import { parseModelString, selectFreeModel } from "./lib/model.mjs";
 

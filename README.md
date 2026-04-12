@@ -23,7 +23,7 @@ they already have.
 - `/opencode:review` for a normal read-only OpenCode review
 - `/opencode:adversarial-review` for a steerable challenge review
 - `/opencode:rescue`, `/opencode:status`, `/opencode:result`, and `/opencode:cancel` to delegate work and manage active jobs
-- Optional rescue worktrees so OpenCode can make writeable changes in an isolated git worktree before you keep or discard them
+- Optional rescue worktrees so OpenCode can make writable changes in an isolated git worktree before you keep or discard them
 
 ## Requirements
 
@@ -141,7 +141,7 @@ OpenCode runs as an independent process with its own permission system, separate
 - A file that Claude Code cannot read or edit (due to a deny rule) **may still be accessible to OpenCode**.
 - `/opencode:rescue` is write-capable by default and has full read/write access to the workspace.
 
-If your workspace uses deny rules, the companion will emit a warning when you start a write-capable task so you can make an informed choice. For fully isolated write operations, use `/opencode:rescue --worktree` which runs in an disposable git worktree.
+If your workspace uses deny rules, the companion will emit a warning when you start a write-capable task so you can make an informed choice. For fully isolated write operations, use `/opencode:rescue --worktree` which runs in a disposable git worktree.
 
 ## Troubleshooting
 
