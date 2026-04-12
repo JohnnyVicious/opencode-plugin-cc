@@ -25,6 +25,29 @@ describe("process", () => {
     const { stderr, exitCode } = await runCommand("sh", ["-c", "echo err >&2"]);
     assert.ok(stderr.includes("err"));
   });
+
+  it("runCommand caps stdout at maxOutputBytes and reports overflowed", async () => {
+    // 20k bytes of 'a' via awk — POSIX-portable, works on BSD and GNU.
+    const { stdout, overflowed } = await runCommand(
+      "awk",
+      ["BEGIN{for(i=0;i<20000;i++)printf \"a\"}"],
+      { maxOutputBytes: 1000 }
+    );
+    assert.equal(overflowed, true);
+    assert.ok(stdout.length <= 1000, `stdout length ${stdout.length} exceeded cap 1000`);
+    // The captured prefix should still be 'a' characters (partial read).
+    assert.match(stdout, /^a+$/);
+  });
+
+  it("runCommand does not overflow when output is under the cap", async () => {
+    const { stdout, overflowed } = await runCommand(
+      "sh",
+      ["-c", "printf 'hello'"],
+      { maxOutputBytes: 1000 }
+    );
+    assert.equal(overflowed, false);
+    assert.equal(stdout, "hello");
+  });
 });
 
 // Tests for OpenCode auth.json discovery + provider detection.

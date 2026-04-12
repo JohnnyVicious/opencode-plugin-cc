@@ -55,8 +55,9 @@ export function appendLine(filePath, line) {
 export function tailLines(filePath, n = 10) {
   try {
     const content = fs.readFileSync(filePath, "utf8");
-    const lines = content.split("\n").filter(Boolean);
-    return lines.slice(-n);
+    const lines = content.split("\n");
+    const nonEmpty = lines.filter((line) => line.length > 0);
+    return nonEmpty.slice(-n);
   } catch {
     return [];
   }

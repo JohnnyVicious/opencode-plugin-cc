@@ -208,7 +208,14 @@ export function renderSetup(status) {
     lines.push(`- **Providers**: None configured. Run \`!opencode providers\` to set up.`);
   }
   if (status.reviewGate !== undefined) {
-    lines.push(`- **Review Gate**: ${status.reviewGate ? "Enabled" : "Disabled"}`);
+    const parts = [status.reviewGate ? "Enabled" : "Disabled"];
+    if (status.reviewGateMaxPerSession != null) {
+      parts.push(`limit ${status.reviewGateMaxPerSession}/session`);
+    }
+    if (status.reviewGateCooldownMinutes != null) {
+      parts.push(`cooldown ${status.reviewGateCooldownMinutes} min`);
+    }
+    lines.push(`- **Review Gate**: ${parts.join(", ")}`);
   }
 
   return lines.join("\n");

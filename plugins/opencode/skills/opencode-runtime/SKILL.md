@@ -28,6 +28,7 @@ Command selection:
 - If the forwarded request includes `--free`, pass it through to `task`. The companion will shell out to `opencode models`, filter for first-party `opencode/*` free-tier entries (`:free` or `-free`), and pick one at random. `--free` is restricted to `opencode/*` because OpenRouter free models have inconsistent tool-use support.
 - If the forwarded request includes both `--free` and `--model`, do not invoke `task` — return nothing, because the companion will reject the combination.
 - If the forwarded request includes `--agent`, pass it through to `task`.
+- If the forwarded request includes `--worktree`, pass it through to `task`. This runs OpenCode in a disposable git worktree so the user can keep or discard the change after the run finishes.
 - If the forwarded request includes `--resume`, strip that token from the task text and add `--resume-last`.
 - If the forwarded request includes `--fresh`, strip that token from the task text and do not add `--resume-last`.
 - `--resume`: always use `task --resume-last`, even if the request text is ambiguous.

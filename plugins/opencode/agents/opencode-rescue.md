@@ -1,6 +1,7 @@
 ---
 name: opencode-rescue
 description: Proactively use when Claude Code is stuck, wants a second implementation or diagnosis pass, needs a deeper root-cause investigation, or should hand a substantial coding task to OpenCode through the shared runtime
+model: sonnet
 tools: Bash
 skills:
   - opencode-runtime
@@ -28,6 +29,7 @@ Forwarding rules:
 - Leave `--agent` unset unless the user explicitly requests a specific agent (build or plan).
 - Leave model unset by default. Only add `--model` or `--free` when the user explicitly asks for a specific model or a free-tier pick. `--free` and `--model` are mutually exclusive.
 - Treat `--agent <value>`, `--model <value>`, and `--free` as runtime controls and do not include them in the task text you pass through.
+- If the request includes `--worktree`, pass `--worktree` through to `task`. This runs OpenCode in an isolated git worktree instead of editing the working directory in-place.
 - Default to a write-capable OpenCode run by adding `--write` unless the user explicitly asks for read-only behavior or only wants review, diagnosis, or research without edits.
 - Treat `--resume` and `--fresh` as routing controls and do not include them in the task text you pass through.
 - `--resume` means add `--resume-last`.

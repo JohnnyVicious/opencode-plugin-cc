@@ -8,7 +8,9 @@ allowed-tools: Bash(node:*)
 Run the result command and return output verbatim.
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" result $ARGUMENTS
+node "${CLAUDE_PLUGIN_ROOT}/scripts/safe-command.mjs" result <<'OPENCODE_ARGS'
+$ARGUMENTS
+OPENCODE_ARGS
 ```
 
 - Return the command stdout verbatim, exactly as-is.

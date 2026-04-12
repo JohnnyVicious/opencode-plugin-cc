@@ -1,7 +1,99 @@
 // Job control: query, sort, enrich, and build status snapshots.
 
 import { tailLines } from "./fs.mjs";
-import { jobLogPath } from "./state.mjs";
+import { jobLogPath, loadState, upsertJob } from "./state.mjs";
+import { isProcessAlive } from "./process.mjs";
+
+function isActiveJobStatus(status) {
+  return status !== "completed" && status !== "failed";
+}
+
+function shouldReconcileDeadPids() {
+  return !/^(1|true|yes)$/i.test(process.env.OPENCODE_COMPANION_NO_RECONCILE ?? "");
+}
+
+/**
+ * Mark a job as failed because its tracked PID is no longer alive. Re-reads
+ * the latest persisted state before writing to guard against a legitimate
+ * completion racing the probe.
+ *
+ * @param {string} workspacePath
+ * @param {string} jobId
+ * @param {number} pid - the pid we observed as dead
+ * @param {string|null} [pidStartToken] - the process-start token observed as dead
+ * @returns {boolean} true if a write happened
+ */
+export function markDeadPidJobFailed(workspacePath, jobId, pid, pidStartToken = null) {
+  const latest = loadState(workspacePath).jobs?.find((j) => j.id === jobId);
+  if (!latest) return false;
+
+  // Only overwrite active states; never downgrade terminal states.
+  if (!isActiveJobStatus(latest.status)) return false;
+
+  // Only overwrite if the PID still matches what we observed as dead. Guards
+  // against a job that legitimately restarted with a new PID between the
+  // probe and the write.
+  if (latest.pid !== pid) return false;
+  if (pidStartToken && latest.pidStartToken && latest.pidStartToken !== pidStartToken) {
+    return false;
+  }
+
+  upsertJob(workspacePath, {
+    id: jobId,
+    status: "failed",
+    phase: "failed",
+    pid: null,
+    pidStartToken: null,
+    errorMessage: `Tracked process PID ${pid} exited unexpectedly without writing a terminal status.`,
+    completedAt: new Date().toISOString(),
+  });
+  return true;
+}
+
+/**
+ * If a job is still marked active but its tracked PID is dead, reconcile it
+ * to failed and return the updated record. Otherwise return the original.
+ *
+ * Called from every status read path so a single status query is enough to
+ * surface dead workers — no need to wait for SessionEnd.
+ *
+ * @param {string} workspacePath
+ * @param {object} job
+ * @returns {object}
+ */
+export function reconcileIfDead(workspacePath, job) {
+  if (!shouldReconcileDeadPids()) return job;
+  if (!job || !isActiveJobStatus(job.status)) return job;
+  const pid = Number.isFinite(job.pid) ? job.pid : null;
+  if (pid === null) return job;
+  if (isProcessAlive(pid, job.pidStartToken)) return job;
+
+  try {
+    markDeadPidJobFailed(workspacePath, job.id, pid, job.pidStartToken);
+  } catch {
+    // Never let reconciliation errors crash a status read.
+    return job;
+  }
+
+  const latest = loadState(workspacePath).jobs?.find((j) => j.id === job.id);
+  return latest ?? job;
+}
+
+/**
+ * Reconcile all active jobs in the given list against live PIDs.
+ * Returns a new list where dead-PID jobs have been rewritten to failed.
+ *
+ * Cheap shortcut used by handlers that otherwise operate on pure job arrays
+ * (handleCancel, handleResult) so a single call surfaces dead workers.
+ *
+ * @param {object[]} jobs
+ * @param {string} workspacePath
+ * @returns {object[]}
+ */
+export function reconcileAllJobs(jobs, workspacePath) {
+  if (!Array.isArray(jobs) || jobs.length === 0) return jobs;
+  return jobs.map((j) => reconcileIfDead(workspacePath, j));
+}
 
 /**
  * Sort jobs newest first by updatedAt.
@@ -83,10 +175,13 @@ export function buildStatusSnapshot(jobs, workspacePath, opts = {}) {
   }
 
   const sorted = sortJobsNewestFirst(filtered);
-  const enriched = sorted.map((j) => enrichJob(j, workspacePath));
+  // Reconcile any active jobs whose tracked PID is dead before enriching, so
+  // a single status read surfaces stuck workers immediately.
+  const reconciled = sorted.map((j) => reconcileIfDead(workspacePath, j));
+  const enriched = reconciled.map((j) => enrichJob(j, workspacePath));
 
-  const running = enriched.filter((j) => j.status === "running");
-  const finished = enriched.filter((j) => j.status !== "running");
+  const running = enriched.filter((j) => isActiveJobStatus(j.status));
+  const finished = enriched.filter((j) => !isActiveJobStatus(j.status));
   const latestFinished = finished[0] ?? null;
   const recent = finished.slice(0, 5);
 
@@ -130,17 +225,31 @@ export function resolveResultJob(jobs, ref) {
 }
 
 /**
- * Resolve a job that can be canceled (running).
+ * Resolve a job that can be canceled (any active/non-terminal state).
+ *
+ * When opts.sessionId is set, the default target (no ref) is restricted to
+ * jobs from that session so `/opencode:cancel` doesn't reach across Claude
+ * sessions and kill unrelated work. An explicit ref still searches all active
+ * jobs — if the user names a job, they asked for it by name.
+ *
  * @param {object[]} jobs
  * @param {string} [ref]
- * @returns {{ job: object|null, ambiguous: boolean }}
+ * @param {{ sessionId?: string }} [opts]
+ * @returns {{ job: object|null, ambiguous: boolean, sessionScoped?: boolean }}
  */
-export function resolveCancelableJob(jobs, ref) {
-  const running = jobs.filter((j) => j.status === "running");
-  if (!ref) {
-    return { job: running[0] ?? null, ambiguous: running.length > 1 };
+export function resolveCancelableJob(jobs, ref, opts = {}) {
+  const running = jobs.filter((j) => isActiveJobStatus(j.status));
+  if (ref) {
+    return matchJobReference(running, ref);
   }
-  return matchJobReference(running, ref);
+  const scoped = opts.sessionId
+    ? running.filter((j) => j.sessionId === opts.sessionId)
+    : running;
+  return {
+    job: scoped[0] ?? null,
+    ambiguous: scoped.length > 1,
+    sessionScoped: Boolean(opts.sessionId),
+  };
 }
 
 /**

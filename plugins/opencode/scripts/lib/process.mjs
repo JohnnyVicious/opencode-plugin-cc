@@ -8,10 +8,28 @@
 // `/opencode:setup` always report `providers: []`. (Apache License 2.0
 // §4(b) modification notice.)
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+/**
+ * Shell option for child_process.spawn that is correct on every platform:
+ *
+ * - POSIX: `false` — pass argv directly to `execvp`.
+ * - Windows: if `$SHELL` points at a POSIX shell (Git Bash, MSYS), use it so
+ *   users who wrote their PATH for Git Bash don't get cmd.exe behavior.
+ *   Otherwise `true` falls back to Node's default (cmd.exe), which is still
+ *   needed so .cmd / .bat shims resolve.
+ *
+ * Without this, bare names like `opencode`, `git`, `gh`, `where` spawned on
+ * Windows hit ENOENT because Node won't resolve .cmd shims on its own.
+ * @returns {string|true|false}
+ */
+export function platformShellOption() {
+  if (process.platform !== "win32") return false;
+  return process.env.SHELL || true;
+}
 
 /**
  * Resolve the full path to the `opencode` binary.
@@ -19,10 +37,22 @@ import path from "node:path";
  */
 export async function resolveOpencodeBinary() {
   return new Promise((resolve) => {
-    const proc = spawn("which", ["opencode"], { stdio: ["ignore", "pipe", "ignore"] });
+    const isWin = process.platform === "win32";
+    const locator = isWin ? "where" : "which";
+    const proc = spawn(locator, ["opencode"], {
+      stdio: ["ignore", "pipe", "ignore"],
+      shell: platformShellOption(),
+      windowsHide: true,
+    });
     let out = "";
     proc.stdout.on("data", (d) => (out += d));
-    proc.on("close", (code) => resolve(code === 0 ? out.trim() : null));
+    proc.on("error", () => resolve(null));
+    proc.on("close", (code) => {
+      if (code !== 0) return resolve(null);
+      // `where` returns all matches separated by CRLF; pick the first.
+      const first = out.trim().split(/\r?\n/)[0] ?? "";
+      resolve(first || null);
+    });
   });
 }
 
@@ -43,6 +73,8 @@ export async function getOpencodeVersion() {
   return new Promise((resolve) => {
     const proc = spawn("opencode", ["--version"], {
       stdio: ["ignore", "pipe", "ignore"],
+      shell: platformShellOption(),
+      windowsHide: true,
     });
     let out = "";
     proc.stdout.on("data", (d) => (out += d));
@@ -51,11 +83,18 @@ export async function getOpencodeVersion() {
 }
 
 /**
- * Run a command and return { stdout, stderr, exitCode }.
+ * Run a command and return { stdout, stderr, exitCode, overflowed }.
+ *
+ * Supports bounded output reads via `opts.maxOutputBytes`. When that cap is
+ * set and the child's stdout would exceed it, the child is killed and the
+ * returned `overflowed` flag is set to `true`. This lets callers probe
+ * potentially-huge outputs (e.g. `git diff` for a big changeset) without
+ * materializing the whole buffer in memory.
+ *
  * @param {string} cmd
  * @param {string[]} args
- * @param {object} [opts]
- * @returns {Promise<{ stdout: string, stderr: string, exitCode: number }>}
+ * @param {{ cwd?: string, env?: object, maxOutputBytes?: number }} [opts]
+ * @returns {Promise<{ stdout: string, stderr: string, exitCode: number, overflowed: boolean }>}
  */
 export function runCommand(cmd, args, opts = {}) {
   return new Promise((resolve) => {
@@ -63,12 +102,48 @@ export function runCommand(cmd, args, opts = {}) {
       stdio: ["ignore", "pipe", "pipe"],
       cwd: opts.cwd,
       env: { ...process.env, ...opts.env },
+      shell: platformShellOption(),
+      windowsHide: true,
     });
+
+    const maxOutputBytes = Number.isFinite(opts.maxOutputBytes) && opts.maxOutputBytes > 0
+      ? opts.maxOutputBytes
+      : null;
     let stdout = "";
+    let stdoutBytes = 0;
     let stderr = "";
-    proc.stdout.on("data", (d) => (stdout += d));
+    let overflowed = false;
+
+    proc.stdout.on("data", (chunk) => {
+      if (overflowed) return;
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      stdoutBytes += buf.length;
+      if (maxOutputBytes !== null && stdoutBytes > maxOutputBytes) {
+        overflowed = true;
+        // Keep whatever we've seen up to the cap, then kill the child.
+        const keep = maxOutputBytes - (stdoutBytes - buf.length);
+        if (keep > 0) stdout += buf.slice(0, keep).toString("utf8");
+        try {
+          proc.kill("SIGTERM");
+        } catch {
+          // best-effort; ignore
+        }
+        return;
+      }
+      stdout += buf.toString("utf8");
+    });
     proc.stderr.on("data", (d) => (stderr += d));
-    proc.on("close", (exitCode) => resolve({ stdout, stderr, exitCode: exitCode ?? 1 }));
+    proc.on("close", (exitCode) =>
+      resolve({
+        stdout,
+        stderr,
+        // When we killed the child for overflow the exit code is not
+        // meaningful — surface a synthetic 0 so callers can still consume
+        // the partial stdout via the overflowed flag.
+        exitCode: overflowed ? 0 : exitCode ?? 1,
+        overflowed,
+      })
+    );
   });
 }
 
@@ -85,9 +160,90 @@ export function spawnDetached(cmd, args, opts = {}) {
     detached: true,
     cwd: opts.cwd,
     env: { ...process.env, ...opts.env },
+    shell: platformShellOption(),
+    windowsHide: true,
   });
   child.unref();
   return child;
+}
+
+/**
+ * Return a stable best-effort process start token for PID-recycling checks.
+ * The token format is intentionally opaque and platform-prefixed.
+ * @param {number | null | undefined} pid
+ * @returns {string|null}
+ */
+export function getProcessStartToken(pid) {
+  if (pid == null || !Number.isFinite(pid) || pid <= 0) return null;
+
+  if (process.platform === "linux") {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      const endOfComm = stat.lastIndexOf(")");
+      if (endOfComm !== -1) {
+        const fieldsFromState = stat.slice(endOfComm + 2).trim().split(/\s+/);
+        const startTime = fieldsFromState[19];
+        if (startTime) return `linux:${startTime}`;
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  if (process.platform === "darwin" || process.platform === "freebsd") {
+    const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf8",
+      shell: platformShellOption(),
+      windowsHide: true,
+    });
+    const started = result.status === 0 ? result.stdout.trim() : "";
+    return started ? `${process.platform}:${started}` : null;
+  }
+
+  if (process.platform === "win32") {
+    const result = spawnSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-Command",
+        `(Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}").CreationDate`,
+      ],
+      {
+        encoding: "utf8",
+        windowsHide: true,
+      }
+    );
+    const started = result.status === 0 ? result.stdout.trim() : "";
+    return started ? `win32:${started}` : null;
+  }
+
+  return null;
+}
+
+/**
+ * Check whether a process is still alive. Uses signal 0 which does not
+ * affect the process — only probes existence. When an expected start token
+ * is supplied and the platform can read the current process start token, a
+ * token mismatch is treated as dead to avoid PID-recycling false positives.
+ * @param {number | null | undefined} pid
+ * @param {string | null | undefined} expectedStartToken
+ * @returns {boolean}
+ */
+export function isProcessAlive(pid, expectedStartToken = null) {
+  if (pid == null || !Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+  } catch (err) {
+    // ESRCH = dead. EPERM/EACCES = exists but no permission.
+    if (err?.code !== "EPERM" && err?.code !== "EACCES") return false;
+    return true;
+  }
+
+  if (expectedStartToken) {
+    const actualStartToken = getProcessStartToken(pid);
+    if (actualStartToken && actualStartToken !== expectedStartToken) return false;
+  }
+  return true;
 }
 
 // ------------------------------------------------------------------

@@ -20,7 +20,9 @@
 // (Apache License 2.0 §4(b) modification notice — see NOTICE.)
 
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
+import { platformShellOption } from "./process.mjs";
 
 const DEFAULT_PORT = 4096;
 const DEFAULT_HOST = "127.0.0.1";
@@ -35,7 +37,11 @@ const SERVER_START_TIMEOUT = 30_000;
 export function getBundledConfigDir() {
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
   if (!pluginRoot) return null;
-  return path.join(pluginRoot, "opencode-config");
+  const configDir = path.join(pluginRoot, "opencode-config");
+  try {
+    if (fs.existsSync(configDir)) return configDir;
+  } catch {}
+  return null;
 }
 
 /**
@@ -95,6 +101,8 @@ export async function ensureServer(opts = {}) {
     detached: true,
     cwd: opts.cwd,
     env,
+    shell: platformShellOption(),
+    windowsHide: true,
   });
   proc.unref();
 

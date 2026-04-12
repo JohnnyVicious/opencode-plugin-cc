@@ -61,10 +61,56 @@ describe("job-control", () => {
     assert.equal(job.id, "task-def");
   });
 
-  it("resolveCancelableJob returns null when no running jobs", () => {
+  it("resolveCancelableJob returns null when no active jobs", () => {
     const noRunning = jobs.filter((j) => j.status !== "running");
     const { job } = resolveCancelableJob(noRunning);
     assert.equal(job, null);
+  });
+
+  it("resolveCancelableJob treats pending jobs as cancelable", () => {
+    const pendingJobs = [
+      { id: "task-pending", status: "pending", type: "task", updatedAt: "2026-01-01T03:00:00Z", createdAt: "2026-01-01T03:00:00Z" },
+    ];
+    const { job } = resolveCancelableJob(pendingJobs, "task-pending");
+    assert.equal(job.id, "task-pending");
+  });
+
+  it("resolveCancelableJob default is scoped to sessionId when provided", () => {
+    const multiSession = [
+      { id: "task-mine", status: "running", type: "task", sessionId: "S1", updatedAt: "2026-01-01T02:00:00Z", createdAt: "2026-01-01T01:30:00Z" },
+      { id: "task-other", status: "running", type: "task", sessionId: "S2", updatedAt: "2026-01-01T02:05:00Z", createdAt: "2026-01-01T01:35:00Z" },
+    ];
+    const { job, sessionScoped } = resolveCancelableJob(multiSession, undefined, { sessionId: "S1" });
+    assert.equal(job.id, "task-mine");
+    assert.equal(sessionScoped, true);
+  });
+
+  it("resolveCancelableJob default returns null when session has no active jobs", () => {
+    const multiSession = [
+      { id: "task-other", status: "running", type: "task", sessionId: "S2", updatedAt: "2026-01-01T02:05:00Z", createdAt: "2026-01-01T01:35:00Z" },
+    ];
+    const { job, sessionScoped } = resolveCancelableJob(multiSession, undefined, { sessionId: "S1" });
+    assert.equal(job, null);
+    assert.equal(sessionScoped, true);
+  });
+
+  it("resolveCancelableJob explicit ref searches across sessions", () => {
+    const multiSession = [
+      { id: "task-mine", status: "running", type: "task", sessionId: "S1", updatedAt: "2026-01-01T02:00:00Z", createdAt: "2026-01-01T01:30:00Z" },
+      { id: "task-other", status: "running", type: "task", sessionId: "S2", updatedAt: "2026-01-01T02:05:00Z", createdAt: "2026-01-01T01:35:00Z" },
+    ];
+    const { job } = resolveCancelableJob(multiSession, "task-other", { sessionId: "S1" });
+    assert.equal(job.id, "task-other");
+  });
+
+  it("resolveCancelableJob default is ambiguous when session has multiple active jobs", () => {
+    const multiSession = [
+      { id: "task-a", status: "running", type: "task", sessionId: "S1", updatedAt: "2026-01-01T02:00:00Z", createdAt: "2026-01-01T01:30:00Z" },
+      { id: "task-b", status: "pending", type: "task", sessionId: "S1", updatedAt: "2026-01-01T02:05:00Z", createdAt: "2026-01-01T01:35:00Z" },
+    ];
+    const { job, ambiguous } = resolveCancelableJob(multiSession, undefined, { sessionId: "S1" });
+    assert.equal(job.id, "task-a");
+    assert.equal(ambiguous, true);
   });
 
   it("buildStatusSnapshot separates running and finished", () => {
@@ -73,5 +119,15 @@ describe("job-control", () => {
     assert.equal(snapshot.running[0].id, "task-def");
     assert.ok(snapshot.latestFinished);
     assert.equal(snapshot.recent.length, 2);
+  });
+
+  it("buildStatusSnapshot treats pending jobs as active, not finished", () => {
+    const pendingJobs = [
+      { id: "task-pending", status: "pending", type: "task", updatedAt: "2026-01-01T03:00:00Z", createdAt: "2026-01-01T03:00:00Z" },
+      ...jobs,
+    ];
+    const snapshot = buildStatusSnapshot(pendingJobs, "/tmp/test");
+    assert.equal(snapshot.running.some((j) => j.id === "task-pending"), true);
+    assert.equal(snapshot.recent.some((j) => j.id === "task-pending"), false);
   });
 });

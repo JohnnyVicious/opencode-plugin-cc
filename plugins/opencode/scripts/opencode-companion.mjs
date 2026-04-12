@@ -46,6 +46,8 @@
 //     now honor `--model` / `--free` end-to-end.
 // (Apache License 2.0 §4(b) modification notice.)
 
+import crypto from "node:crypto";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import fs from "node:fs";
@@ -55,7 +57,14 @@ import { isOpencodeInstalled, getOpencodeVersion, spawnDetached, getConfiguredPr
 import { isServerRunning, ensureServer, createClient, connect } from "./lib/opencode-server.mjs";
 import { resolveWorkspace } from "./lib/workspace.mjs";
 import { loadState, updateState, upsertJob, generateJobId, jobDataPath } from "./lib/state.mjs";
-import { buildStatusSnapshot, resolveResultJob, resolveCancelableJob, enrichJob } from "./lib/job-control.mjs";
+import {
+  buildStatusSnapshot,
+  resolveResultJob,
+  resolveCancelableJob,
+  enrichJob,
+  reconcileAllJobs,
+  matchJobReference,
+} from "./lib/job-control.mjs";
 import { createJobRecord, runTrackedJob, getClaudeSessionId } from "./lib/tracked-jobs.mjs";
 import {
   renderStatus,
@@ -67,6 +76,11 @@ import {
 } from "./lib/render.mjs";
 import { buildReviewPrompt, buildTaskPrompt } from "./lib/prompts.mjs";
 import { getDiff, getStatus as getGitStatus, detectPrReference } from "./lib/git.mjs";
+import {
+  createWorktreeSession,
+  diffWorktreeSession,
+  cleanupWorktreeSession,
+} from "./lib/worktree.mjs";
 import { readJson } from "./lib/fs.mjs";
 import { resolveReviewAgent } from "./lib/review-agent.mjs";
 import { parseModelString, selectFreeModel } from "./lib/model.mjs";
@@ -86,6 +100,8 @@ const handlers = {
   task: handleTask,
   "task-worker": handleTaskWorker,
   "task-resume-candidate": handleTaskResumeCandidate,
+  "last-review": handleLastReview,
+  "worktree-cleanup": handleWorktreeCleanup,
   status: handleStatus,
   result: handleResult,
   cancel: handleCancel,
@@ -109,8 +125,35 @@ handler(argv).catch((err) => {
 
 async function handleSetup(argv) {
   const { options } = parseArgs(argv, {
+    valueOptions: ["review-gate-max", "review-gate-cooldown"],
     booleanOptions: ["json", "enable-review-gate", "disable-review-gate"],
   });
+
+  let reviewGateOverride;
+  if (options["enable-review-gate"]) reviewGateOverride = true;
+  if (options["disable-review-gate"]) reviewGateOverride = false;
+
+  let reviewGateMaxPerSessionOverride;
+  if (options["review-gate-max"] != null) {
+    const raw = options["review-gate-max"];
+    const max = raw === "off" ? null : Number(raw);
+    if (max !== null && (!Number.isInteger(max) || max < 1)) {
+      console.error(`--review-gate-max must be a positive integer or "off".`);
+      process.exit(1);
+    }
+    reviewGateMaxPerSessionOverride = max;
+  }
+
+  let reviewGateCooldownMinutesOverride;
+  if (options["review-gate-cooldown"] != null) {
+    const raw = options["review-gate-cooldown"];
+    const cooldown = raw === "off" ? null : Number(raw);
+    if (cooldown !== null && (!Number.isInteger(cooldown) || cooldown < 1)) {
+      console.error(`--review-gate-cooldown must be a positive integer (minutes) or "off".`);
+      process.exit(1);
+    }
+    reviewGateCooldownMinutesOverride = cooldown;
+  }
 
   const installed = await isOpencodeInstalled();
   const version = installed ? await getOpencodeVersion() : null;
@@ -127,31 +170,48 @@ async function handleSetup(argv) {
     // auth methods each provider supports. auth.json is the same source
     // of truth that `opencode providers list` uses, and it works whether
     // or not the OpenCode server is running.
-    providers = getConfiguredProviders();
+    try {
+      providers = getConfiguredProviders();
+    } catch (err) {
+      console.error(`Warning: could not read configured providers: ${err.message}`);
+    }
   }
 
-  // Handle review gate toggle
+  // Apply setup config changes only after all inputs have been validated.
   const workspace = await resolveWorkspace();
-  let reviewGate = false;
-
-  if (options["enable-review-gate"]) {
+  if (
+    reviewGateOverride !== undefined ||
+    reviewGateMaxPerSessionOverride !== undefined ||
+    reviewGateCooldownMinutesOverride !== undefined
+  ) {
     updateState(workspace, (state) => {
       state.config = state.config || {};
-      state.config.reviewGate = true;
+      if (reviewGateOverride !== undefined) {
+        state.config.reviewGate = reviewGateOverride;
+      }
+      if (reviewGateMaxPerSessionOverride !== undefined) {
+        state.config.reviewGateMaxPerSession = reviewGateMaxPerSessionOverride;
+      }
+      if (reviewGateCooldownMinutesOverride !== undefined) {
+        state.config.reviewGateCooldownMinutes = reviewGateCooldownMinutesOverride;
+      }
     });
-    reviewGate = true;
-  } else if (options["disable-review-gate"]) {
-    updateState(workspace, (state) => {
-      state.config = state.config || {};
-      state.config.reviewGate = false;
-    });
-    reviewGate = false;
-  } else {
-    const state = loadState(workspace);
-    reviewGate = state.config?.reviewGate ?? false;
   }
 
-  const status = { installed, version, serverRunning, providers, reviewGate };
+  const finalState = loadState(workspace);
+  const reviewGate = finalState.config?.reviewGate ?? false;
+  const reviewGateMaxPerSession = finalState.config?.reviewGateMaxPerSession ?? null;
+  const reviewGateCooldownMinutes = finalState.config?.reviewGateCooldownMinutes ?? null;
+
+  const status = {
+    installed,
+    version,
+    serverRunning,
+    providers,
+    reviewGate,
+    reviewGateMaxPerSession,
+    reviewGateCooldownMinutes,
+  };
 
   if (options.json) {
     console.log(JSON.stringify(status, null, 2));
@@ -203,8 +263,8 @@ async function handleReview(argv) {
   });
 
   const prNumber = options.pr ? Number(options.pr) : null;
-  if (options.pr && !Number.isFinite(prNumber)) {
-    console.error(`Invalid --pr value: ${options.pr} (must be a number)`);
+  if (options.pr && (!Number.isFinite(prNumber) || prNumber <= 0)) {
+    console.error(`Invalid --pr value: ${options.pr} (must be a positive number)`);
     process.exit(1);
   }
 
@@ -265,6 +325,7 @@ async function handleReview(argv) {
       };
     });
 
+    saveLastReview(workspace, result.rendered);
     console.log(result.rendered);
   } catch (err) {
     console.error(`Review failed: ${err.message}`);
@@ -294,8 +355,8 @@ async function handleAdversarialReview(argv) {
   let prNumber = null;
   if (options.pr) {
     prNumber = Number(options.pr);
-    if (!Number.isFinite(prNumber)) {
-      console.error(`Invalid --pr value: ${options.pr} (must be a number)`);
+    if (!Number.isFinite(prNumber) || prNumber <= 0) {
+      console.error(`Invalid --pr value: ${options.pr} (must be a positive number)`);
       process.exit(1);
     }
   } else {
@@ -356,6 +417,7 @@ async function handleAdversarialReview(argv) {
       };
     });
 
+    saveLastReview(workspace, result.rendered);
     console.log(result.rendered);
   } catch (err) {
     console.error(`Adversarial review failed: ${err.message}`);
@@ -370,11 +432,11 @@ async function handleAdversarialReview(argv) {
 async function handleTask(argv) {
   const { options, positional } = parseArgs(argv, {
     valueOptions: ["model", "agent"],
-    booleanOptions: ["write", "background", "wait", "resume-last", "fresh", "free"],
+    booleanOptions: ["write", "background", "wait", "resume-last", "fresh", "worktree", "free"],
   });
 
   const taskText = extractTaskText(argv, ["model", "agent"], [
-    "write", "background", "wait", "resume-last", "fresh", "free",
+    "write", "background", "wait", "resume-last", "fresh", "worktree", "free",
   ]);
 
   if (!taskText) {
@@ -396,6 +458,12 @@ async function handleTask(argv) {
   const workspace = await resolveWorkspace();
   const isWrite = options.write !== undefined ? options.write : true;
   const agentName = options.agent ?? (isWrite ? "build" : "plan");
+  const useWorktree = Boolean(options.worktree);
+
+  if (useWorktree && !isWrite) {
+    console.error("--worktree requires --write (nothing to isolate in read-only mode).");
+    process.exit(1);
+  }
 
   // Check for resume
   let resumeSessionId = null;
@@ -415,6 +483,7 @@ async function handleTask(argv) {
   const job = createJobRecord(workspace, "task", {
     agent: agentName,
     resumeSessionId,
+    worktree: useWorktree,
   });
 
   // Background mode: spawn a detached worker
@@ -428,6 +497,7 @@ async function handleTask(argv) {
       "--agent", agentName,
     ];
     if (isWrite) workerArgs.push("--write");
+    if (useWorktree) workerArgs.push("--worktree");
     if (resumeSessionId) workerArgs.push("--resume-session", resumeSessionId);
     // Pass the resolved model (from --model or --free) as a concrete
     // "provider/model-id" string so the worker doesn't need to re-run
@@ -447,11 +517,34 @@ async function handleTask(argv) {
     return;
   }
 
+  // Set up a worktree session if requested. Foreground mode only.
+  let worktreeSession = null;
+  let effectiveCwd = workspace;
+  if (useWorktree) {
+    try {
+      worktreeSession = await createWorktreeSession(workspace);
+      effectiveCwd = worktreeSession.worktreePath;
+      upsertJob(workspace, {
+        id: job.id,
+        worktreeSession: {
+          worktreePath: worktreeSession.worktreePath,
+          branch: worktreeSession.branch,
+          repoRoot: worktreeSession.repoRoot,
+          baseCommit: worktreeSession.baseCommit,
+          timestamp: worktreeSession.timestamp,
+        },
+      });
+    } catch (err) {
+      console.error(`Failed to create worktree: ${err.message}`);
+      process.exit(1);
+    }
+  }
+
   // Foreground mode
   try {
     const result = await runTrackedJob(workspace, job, async ({ report, log }) => {
       report("starting", "Connecting to OpenCode server...");
-      const client = await connect({ cwd: workspace });
+      const client = await connect({ cwd: effectiveCwd });
 
       let sessionId;
       if (resumeSessionId) {
@@ -467,7 +560,14 @@ async function handleTask(argv) {
       const prompt = buildTaskPrompt(taskText, { write: isWrite });
 
       report("investigating", "Sending task to OpenCode...");
-      log(`Agent: ${agentName}, Write: ${isWrite}, Prompt: ${prompt.length} chars${requestedModel?.raw ? `, model: ${requestedModel.raw}${options.free ? " (--free picked)" : ""}` : ""}`);
+      log(
+        `Agent: ${agentName}, Write: ${isWrite}, ` +
+          `Worktree: ${useWorktree ? worktreeSession.branch : "no"}, ` +
+          `Prompt: ${prompt.length} chars` +
+          (requestedModel?.raw
+            ? `, model: ${requestedModel.raw}${options.free ? " (--free picked)" : ""}`
+            : "")
+      );
 
       const response = await client.sendPrompt(sessionId, prompt, {
         agent: agentName,
@@ -486,30 +586,152 @@ async function handleTask(argv) {
           if (diff?.files) {
             changedFiles = diff.files.map((f) => f.path || f.name).filter(Boolean);
           }
-        } catch {
-          // diff endpoint may not be available
+        } catch (err) {
+          log(`Warning: could not retrieve diff - ${err.message}`);
+        }
+      }
+
+      // If using a worktree, compute the actual git diff stat produced on
+      // disk. This is what the user will have to keep or discard.
+      let worktreeDiff = null;
+      if (worktreeSession) {
+        try {
+          worktreeDiff = await diffWorktreeSession(worktreeSession);
+        } catch (err) {
+          log(`Failed to compute worktree diff: ${err.message}`);
         }
       }
 
       return {
-        rendered: text,
+        rendered: worktreeSession
+          ? renderWorktreeTaskOutput(text, worktreeSession, worktreeDiff, job.id)
+          : text,
         messages: response,
         changedFiles,
         summary: text.slice(0, 500),
+        worktreeSession: worktreeSession
+          ? {
+              worktreePath: worktreeSession.worktreePath,
+              branch: worktreeSession.branch,
+              repoRoot: worktreeSession.repoRoot,
+              baseCommit: worktreeSession.baseCommit,
+            }
+          : null,
       };
     });
 
     console.log(result.rendered);
   } catch (err) {
+    // On any failure with a worktree, clean it up so we don't leak dirs.
+    if (worktreeSession) {
+      try {
+        await cleanupWorktreeSession(worktreeSession, { keep: false });
+      } catch {
+        // best-effort
+      }
+    }
     console.error(`Task failed: ${err.message}`);
     process.exit(1);
   }
 }
 
+function renderWorktreeTaskOutput(text, session, diff, jobId) {
+  const lines = [];
+  if (text) {
+    lines.push(text.trimEnd());
+    lines.push("");
+  }
+  lines.push("---");
+  lines.push("");
+  lines.push("## Worktree");
+  lines.push("");
+  lines.push(`Branch: \`${session.branch}\``);
+  lines.push(`Path: \`${session.worktreePath}\``);
+  lines.push("");
+  if (diff?.stat) {
+    lines.push("### Changes");
+    lines.push("");
+    lines.push("```");
+    lines.push(diff.stat);
+    lines.push("```");
+    lines.push("");
+  } else {
+    lines.push("OpenCode made no file changes in the worktree.");
+    lines.push("");
+  }
+  lines.push("### Next steps");
+  lines.push("");
+  lines.push(`- **Keep**: \`node "\${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" worktree-cleanup ${jobId} --action keep\``);
+  lines.push(`- **Discard**: \`node "\${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" worktree-cleanup ${jobId} --action discard\``);
+  return lines.join("\n");
+}
+
+async function handleWorktreeCleanup(argv) {
+  const { options, positional } = parseArgs(argv, {
+    valueOptions: ["action"],
+    booleanOptions: ["json"],
+  });
+
+  const jobId = positional[0];
+  if (!jobId) {
+    console.error("Usage: worktree-cleanup <job-id> --action <keep|discard>");
+    process.exit(1);
+  }
+  const action = options.action;
+  if (action !== "keep" && action !== "discard") {
+    console.error("--action must be 'keep' or 'discard'.");
+    process.exit(1);
+  }
+
+  const workspace = await resolveWorkspace();
+  const state = loadState(workspace);
+  const { job, ambiguous } = matchJobReference(state.jobs ?? [], jobId);
+  if (ambiguous) {
+    console.error("Ambiguous job reference. Please provide a more specific ID prefix.");
+    process.exit(1);
+  }
+  if (!job) {
+    console.error(`No job found for ${jobId}.`);
+    process.exit(1);
+  }
+
+  const session = job.worktreeSession;
+  if (!session?.worktreePath || !session?.branch || !session?.repoRoot) {
+    console.error(`Job ${jobId} has no worktree session. Was it run with --worktree?`);
+    process.exit(1);
+  }
+
+  const result = await cleanupWorktreeSession(session, { keep: action === "keep" });
+
+  if (options.json) {
+    console.log(JSON.stringify({ jobId: job.id, action, result }, null, 2));
+    return;
+  }
+
+  const lines = ["# Worktree Cleanup", ""];
+  if (action === "keep") {
+    if (result.applied) {
+      lines.push(`Applied changes from \`${session.branch}\` and cleaned up.`);
+    } else if (result.detail === "No changes to apply.") {
+      lines.push(`No changes to apply. Worktree and branch \`${session.branch}\` cleaned up.`);
+    } else {
+      lines.push(`Failed to apply changes: ${result.detail}`);
+      lines.push("");
+      lines.push(
+        `The worktree and branch \`${session.branch}\` have been preserved at ` +
+          `\`${session.worktreePath}\` for manual recovery.`
+      );
+    }
+  } else {
+    lines.push(`Discarded worktree \`${session.worktreePath}\` and branch \`${session.branch}\`.`);
+  }
+  console.log(lines.join("\n"));
+}
+
 async function handleTaskWorker(argv) {
   const { options } = parseArgs(argv, {
     valueOptions: ["job-id", "workspace", "task-text", "agent", "model", "resume-session"],
-    booleanOptions: ["write"],
+    booleanOptions: ["write", "worktree"],
   });
 
   const workspace = options.workspace;
@@ -517,6 +739,7 @@ async function handleTaskWorker(argv) {
   const taskText = options["task-text"];
   const agentName = options.agent ?? "build";
   const isWrite = !!options.write;
+  const useWorktree = Boolean(options.worktree);
   const resumeSessionId = options["resume-session"];
   // Parent `handleTask` resolves --free/--model into a concrete
   // provider/model-id string before spawning us, so the worker just
@@ -527,10 +750,60 @@ async function handleTaskWorker(argv) {
     process.exit(1);
   }
 
+  let worktreeSession = null;
+  let effectiveCwd = workspace;
+  if (useWorktree) {
+    try {
+      worktreeSession = await createWorktreeSession(workspace);
+      effectiveCwd = worktreeSession.worktreePath;
+      upsertJob(workspace, {
+        id: jobId,
+        worktreeSession: {
+          worktreePath: worktreeSession.worktreePath,
+          branch: worktreeSession.branch,
+          repoRoot: worktreeSession.repoRoot,
+          baseCommit: worktreeSession.baseCommit,
+          timestamp: worktreeSession.timestamp,
+        },
+      });
+    } catch (err) {
+      upsertJob(workspace, {
+        id: jobId,
+        status: "failed",
+        phase: "failed",
+        completedAt: new Date().toISOString(),
+        errorMessage: `Failed to create worktree: ${err.message}`,
+      });
+      process.exit(1);
+    }
+  }
+
+  let signalsHandled = false;
+  const handleSignal = async (signal) => {
+    if (signalsHandled) return;
+    signalsHandled = true;
+    upsertJob(workspace, {
+      id: jobId,
+      status: "failed",
+      completedAt: new Date().toISOString(),
+      errorMessage: `Worker terminated by ${signal}`,
+    });
+    if (worktreeSession) {
+      try {
+        await cleanupWorktreeSession(worktreeSession, { keep: false });
+      } catch {
+        // best-effort
+      }
+    }
+    process.exit(128 + (signal === "SIGINT" ? 2 : 15));
+  };
+  process.on("SIGINT", () => handleSignal("SIGINT"));
+  process.on("SIGTERM", () => handleSignal("SIGTERM"));
+
   try {
     await runTrackedJob(workspace, { id: jobId }, async ({ report, log }) => {
       report("starting", "Background worker connecting to OpenCode...");
-      const client = await connect({ cwd: workspace });
+      const client = await connect({ cwd: effectiveCwd });
 
       let sessionId;
       if (resumeSessionId) {
@@ -545,7 +818,11 @@ async function handleTaskWorker(argv) {
 
       const prompt = buildTaskPrompt(taskText, { write: isWrite });
       report("investigating", "Running task...");
-      if (workerModel) log(`Worker model: ${options.model}`);
+      log(
+        `Agent: ${agentName}, Write: ${isWrite}, ` +
+          `Worktree: ${worktreeSession?.branch ?? "no"}` +
+          (workerModel ? `, model: ${options.model}` : "")
+      );
 
       const response = await client.sendPrompt(sessionId, prompt, {
         agent: agentName,
@@ -553,11 +830,41 @@ async function handleTaskWorker(argv) {
       });
 
       const text = extractResponseText(response);
+
+      let worktreeDiff = null;
+      if (worktreeSession) {
+        try {
+          worktreeDiff = await diffWorktreeSession(worktreeSession);
+        } catch (err) {
+          log(`Failed to compute worktree diff: ${err.message}`);
+        }
+      }
+
       report("finalizing", "Done");
 
-      return { rendered: text, summary: text.slice(0, 500) };
+      return {
+        rendered: worktreeSession
+          ? renderWorktreeTaskOutput(text, worktreeSession, worktreeDiff, jobId)
+          : text,
+        summary: text.slice(0, 500),
+        worktreeSession: worktreeSession
+          ? {
+              worktreePath: worktreeSession.worktreePath,
+              branch: worktreeSession.branch,
+              repoRoot: worktreeSession.repoRoot,
+              baseCommit: worktreeSession.baseCommit,
+            }
+          : null,
+      };
     });
   } catch (err) {
+    if (worktreeSession) {
+      try {
+        await cleanupWorktreeSession(worktreeSession, { keep: false });
+      } catch {
+        // best-effort
+      }
+    }
     // Error is already logged by runTrackedJob
     process.exit(1);
   }
@@ -608,8 +915,9 @@ async function handleResult(argv) {
 
   const workspace = await resolveWorkspace();
   const state = loadState(workspace);
+  const reconciled = reconcileAllJobs(state.jobs ?? [], workspace);
 
-  const { job, ambiguous } = resolveResultJob(state.jobs ?? [], ref);
+  const { job, ambiguous } = resolveResultJob(reconciled, ref);
 
   if (ambiguous) {
     console.error("Ambiguous job reference. Please provide a more specific ID prefix.");
@@ -636,16 +944,26 @@ async function handleCancel(argv) {
 
   const workspace = await resolveWorkspace();
   const state = loadState(workspace);
+  const sessionId = getClaudeSessionId();
+  const reconciled = reconcileAllJobs(state.jobs ?? [], workspace);
 
-  const { job, ambiguous } = resolveCancelableJob(state.jobs ?? [], ref);
+  const { job, ambiguous, sessionScoped } = resolveCancelableJob(
+    reconciled,
+    ref,
+    { sessionId }
+  );
 
   if (ambiguous) {
-    console.error("Multiple running jobs. Please specify a job ID prefix.");
+    console.error("Multiple active jobs. Please specify a job ID prefix.");
     process.exit(1);
   }
 
   if (!job) {
-    console.log("No active job to cancel.");
+    console.log(
+      sessionScoped
+        ? "No active OpenCode jobs to cancel for this session."
+        : "No active job to cancel."
+    );
     return;
   }
 
@@ -676,6 +994,75 @@ async function handleCancel(argv) {
   });
 
   console.log(`Canceled job: ${job.id}`);
+}
+
+// ------------------------------------------------------------------
+// Last-review persistence
+// ------------------------------------------------------------------
+
+/**
+ * Per-repo path where the most recent successful review is saved so the
+ * rescue command can pick it up without the user copy-pasting findings.
+ * @param {string} workspace
+ * @returns {{ dir: string, file: string }}
+ */
+function lastReviewPath(workspace) {
+  const hash = crypto.createHash("sha256").update(workspace).digest("hex").slice(0, 16);
+  const dir = process.env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), ".opencode-companion");
+  return { dir, file: path.join(dir, `last-review-${hash}.md`) };
+}
+
+/**
+ * Best-effort persistence of a rendered review so the rescue flow can read
+ * it later. Never throws — a failed write must not fail the review itself.
+ * @param {string} workspace
+ * @param {string} rendered
+ */
+function saveLastReview(workspace, rendered) {
+  if (!rendered) return;
+  let tmp = null;
+  try {
+    const { dir, file } = lastReviewPath(workspace);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmp, rendered, "utf8");
+    fs.renameSync(tmp, file);
+    tmp = null;
+  } catch {
+    // best-effort
+  } finally {
+    if (tmp) fs.rmSync(tmp, { force: true });
+  }
+}
+
+async function handleLastReview(argv) {
+  const { options } = parseArgs(argv, { booleanOptions: ["json", "content"] });
+  const workspace = await resolveWorkspace();
+  const { file } = lastReviewPath(workspace);
+
+  if (!fs.existsSync(file)) {
+    if (options.json) console.log(JSON.stringify({ available: false }));
+    else console.log("NO_LAST_REVIEW");
+    return;
+  }
+
+  if (options.content) {
+    process.stdout.write(fs.readFileSync(file, "utf8"));
+    return;
+  }
+
+  if (options.json) {
+    const stat = fs.statSync(file);
+    console.log(
+      JSON.stringify({
+        available: true,
+        updatedAt: stat.mtime.toISOString(),
+        path: file,
+      })
+    );
+  } else {
+    console.log("LAST_REVIEW_AVAILABLE");
+  }
 }
 
 // ------------------------------------------------------------------

@@ -4,8 +4,25 @@ import fs from "node:fs";
 import path from "node:path";
 import { ensureDir, appendLine } from "./fs.mjs";
 import { generateJobId, upsertJob, jobLogPath, jobDataPath } from "./state.mjs";
+import { getProcessStartToken } from "./process.mjs";
 
 const SESSION_ID_ENV = "OPENCODE_COMPANION_SESSION_ID";
+
+// Hard ceiling for any single tracked job. 30 minutes is generous enough for
+// long OpenCode turns but bounded so a hung runner cannot keep the companion
+// process alive forever. Override via OPENCODE_COMPANION_JOB_TIMEOUT_MS.
+const DEFAULT_JOB_TIMEOUT_MS = 30 * 60 * 1000;
+
+function resolveJobTimeoutMs(options = {}) {
+  if (Number.isFinite(options.timeoutMs) && options.timeoutMs > 0) {
+    return options.timeoutMs;
+  }
+  const fromEnv = Number(process.env.OPENCODE_COMPANION_JOB_TIMEOUT_MS);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) {
+    return fromEnv;
+  }
+  return DEFAULT_JOB_TIMEOUT_MS;
+}
 
 /**
  * Get the current Claude session ID from environment.
@@ -41,11 +58,17 @@ export function createJobRecord(workspacePath, type, meta = {}) {
  * @param {string} workspacePath
  * @param {object} job
  * @param {(ctx: { report: Function, log: Function }) => Promise<object>} runner
+ * @param {{ timeoutMs?: number }} [options]
  * @returns {Promise<object>} the job result
  */
-export async function runTrackedJob(workspacePath, job, runner) {
+export async function runTrackedJob(workspacePath, job, runner, options = {}) {
   // Mark as running
-  upsertJob(workspacePath, { id: job.id, status: "running", pid: process.pid });
+  upsertJob(workspacePath, {
+    id: job.id,
+    status: "running",
+    pid: process.pid,
+    pidStartToken: getProcessStartToken(process.pid),
+  });
 
   const logFile = jobLogPath(workspacePath, job.id);
   ensureDir(path.dirname(logFile));
@@ -61,14 +84,41 @@ export async function runTrackedJob(workspacePath, job, runner) {
     appendLine(logFile, `[${new Date().toISOString()}] ${message}`);
   };
 
+  // Race the runner against a hard wall-clock timeout so a hung runner
+  // (dropped SSE stream, wedged post-response handler, unresolved downstream
+  // fetch) cannot leave the job in `running` forever. See issue #41.
+  const timeoutMs = resolveJobTimeoutMs(options);
+  let timeoutHandle = null;
+  const timeoutPromise = new Promise((_resolve, reject) => {
+    timeoutHandle = setTimeout(() => {
+      reject(
+        new Error(
+          `Tracked job ${job.id} exceeded the ${Math.round(timeoutMs / 1000)}s hard timeout. ` +
+            "The runner did not produce a terminal status. " +
+            "Set OPENCODE_COMPANION_JOB_TIMEOUT_MS to adjust."
+        )
+      );
+    }, timeoutMs);
+  });
+
+  const clearTimer = () => {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+      timeoutHandle = null;
+    }
+  };
+
   try {
     report("starting", `Job ${job.id} started`);
-    const result = await runner({ report, log });
+    const result = await Promise.race([runner({ report, log }), timeoutPromise]);
+    clearTimer();
 
     // Mark as completed
     upsertJob(workspacePath, {
       id: job.id,
       status: "completed",
+      pid: null,
+      pidStartToken: null,
       completedAt: new Date().toISOString(),
       result: result?.rendered ?? result?.summary ?? null,
     });
@@ -81,9 +131,13 @@ export async function runTrackedJob(workspacePath, job, runner) {
     report("completed", `Job ${job.id} completed`);
     return result;
   } catch (err) {
+    clearTimer();
     upsertJob(workspacePath, {
       id: job.id,
       status: "failed",
+      phase: "failed",
+      pid: null,
+      pidStartToken: null,
       completedAt: new Date().toISOString(),
       errorMessage: err.message,
     });
