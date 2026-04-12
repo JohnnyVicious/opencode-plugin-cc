@@ -1,6 +1,6 @@
 ---
 description: Run a steerable adversarial OpenCode review that challenges implementation and design decisions
-argument-hint: '[--wait|--background] [--base <ref>] [focus area or custom review instructions]'
+argument-hint: '[--wait|--background] [--base <ref>] [--model <id>] [focus area or custom review instructions]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
 ---
@@ -33,9 +33,10 @@ Execution mode rules:
 
 Argument handling:
 - Preserve the user's arguments exactly.
-- Do not strip `--wait` or `--background` yourself.
+- Do not strip `--wait`, `--background`, or `--model` yourself.
 - Adversarial reviews support custom focus text. Any text after flags is treated as a focus area.
 - The companion script handles `--adversarial` internally.
+- `--model <id>` overrides OpenCode's default model for this single review (e.g. `--model openrouter/anthropic/claude-opus-4-6`). Pass it through verbatim if the user supplied it.
 
 Foreground flow:
 - Run:

@@ -3,6 +3,10 @@
 // OpenCode Companion - Main entry point for the Claude Code plugin.
 // Mirrors the codex-plugin-cc codex-companion.mjs architecture but uses
 // OpenCode's HTTP REST API instead of JSON-RPC over stdin/stdout.
+//
+// Modified by JohnnyVicious (2026): thread `--model` through `handleReview`
+// and `handleAdversarialReview` so callers can override OpenCode's default
+// model per review. (Apache License 2.0 §4(b) modification notice.)
 
 import path from "node:path";
 import process from "node:process";
@@ -119,12 +123,12 @@ async function handleSetup(argv) {
 
 async function handleReview(argv) {
   const { options } = parseArgs(argv, {
-    valueOptions: ["base", "scope"],
+    valueOptions: ["base", "scope", "model"],
     booleanOptions: ["wait", "background"],
   });
 
   const workspace = await resolveWorkspace();
-  const job = createJobRecord(workspace, "review", { base: options.base });
+  const job = createJobRecord(workspace, "review", { base: options.base, model: options.model });
 
   try {
     const result = await runTrackedJob(workspace, job, async ({ report, log }) => {
@@ -141,10 +145,11 @@ async function handleReview(argv) {
       }, PLUGIN_ROOT);
 
       report("reviewing", "Running review...");
-      log(`Prompt length: ${prompt.length} chars`);
+      log(`Prompt length: ${prompt.length} chars${options.model ? `, model: ${options.model}` : ""}`);
 
       const response = await client.sendPrompt(session.id, prompt, {
         agent: "plan", // read-only agent for reviews
+        model: options.model,
       });
 
       report("finalizing", "Processing review output...");
@@ -169,7 +174,7 @@ async function handleReview(argv) {
 
 async function handleAdversarialReview(argv) {
   const { options, positional } = parseArgs(argv, {
-    valueOptions: ["base", "scope"],
+    valueOptions: ["base", "scope", "model"],
     booleanOptions: ["wait", "background"],
   });
 
@@ -178,6 +183,7 @@ async function handleAdversarialReview(argv) {
   const job = createJobRecord(workspace, "adversarial-review", {
     base: options.base,
     focus,
+    model: options.model,
   });
 
   try {
@@ -196,10 +202,11 @@ async function handleAdversarialReview(argv) {
       }, PLUGIN_ROOT);
 
       report("reviewing", "Running adversarial review...");
-      log(`Prompt length: ${prompt.length} chars, focus: ${focus || "(none)"}`);
+      log(`Prompt length: ${prompt.length} chars, focus: ${focus || "(none)"}${options.model ? `, model: ${options.model}` : ""}`);
 
       const response = await client.sendPrompt(session.id, prompt, {
         agent: "plan",
+        model: options.model,
       });
 
       report("finalizing", "Processing review output...");
