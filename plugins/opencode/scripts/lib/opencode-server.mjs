@@ -104,11 +104,28 @@ export async function ensureServer(opts = {}) {
     shell: platformShellOption(),
     windowsHide: true,
   });
+  let spawnError = null;
+  let earlyExit = null;
+  proc.once("error", (err) => {
+    spawnError = err;
+  });
+  proc.once("exit", (code, signal) => {
+    earlyExit = { code, signal };
+  });
   proc.unref();
 
   // Wait for the server to become ready
   const deadline = Date.now() + SERVER_START_TIMEOUT;
   while (Date.now() < deadline) {
+    if (spawnError) {
+      throw new Error(`Failed to start OpenCode server: ${spawnError.message}`);
+    }
+    if (earlyExit) {
+      const detail = earlyExit.signal
+        ? `signal ${earlyExit.signal}`
+        : `exit code ${earlyExit.code ?? "unknown"}`;
+      throw new Error(`OpenCode server process exited before becoming ready (${detail}).`);
+    }
     if (await isServerRunning(host, port)) {
       return { url, pid: proc.pid, alreadyRunning: false };
     }

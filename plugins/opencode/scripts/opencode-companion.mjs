@@ -535,6 +535,13 @@ async function handleTask(argv) {
         },
       });
     } catch (err) {
+      upsertJob(workspace, {
+        id: job.id,
+        status: "failed",
+        phase: "failed",
+        completedAt: new Date().toISOString(),
+        errorMessage: `Failed to create worktree: ${err.message}`,
+      });
       console.error(`Failed to create worktree: ${err.message}`);
       process.exit(1);
     }
