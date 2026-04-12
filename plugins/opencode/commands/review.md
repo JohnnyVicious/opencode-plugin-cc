@@ -1,8 +1,8 @@
 ---
-description: Run an OpenCode code review against local git state
-argument-hint: '[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch] [--model <id>]'
+description: Run an OpenCode code review against local git state or a GitHub PR
+argument-hint: '[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch] [--model <id>] [--pr <number>]'
 disable-model-invocation: true
-allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
+allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), Bash(gh:*), AskUserQuestion
 ---
 
 Run an OpenCode review through the shared built-in reviewer.
@@ -22,6 +22,7 @@ Execution mode rules:
   - For working-tree review, start with `git status --short --untracked-files=all`.
   - For working-tree review, also inspect both `git diff --shortstat --cached` and `git diff --shortstat`.
   - For base-branch review, use `git diff --shortstat <base>...HEAD`.
+  - For PR review (`--pr <N>`), use `gh pr view <N> --json additions,deletions,changedFiles` and base the recommendation on those numbers (large PRs almost always go to background).
   - Treat untracked files or directories as reviewable work even when `git diff --shortstat` is empty.
   - Only conclude there is nothing to review when the relevant working-tree status is empty or the explicit branch diff is empty.
   - Recommend waiting only when the review is clearly tiny, roughly 1-2 files total and no sign of a broader directory-sized change.
@@ -39,6 +40,7 @@ Argument handling:
 - `/opencode:review` is native-review only. It does not support staged-only review, unstaged-only review, or extra focus text.
 - If the user needs custom review instructions or more adversarial framing, they should use `/opencode:adversarial-review`.
 - `--model <id>` overrides OpenCode's default model for this single review (e.g. `--model openrouter/anthropic/claude-opus-4-6`). Pass it through verbatim if the user supplied it.
+- `--pr <number>` reviews a GitHub pull request via `gh pr diff` instead of the local working tree. The cwd must be a git repo whose remote points at the PR's repository, and `gh` must be installed and authenticated. Pass it through verbatim if the user supplied it.
 
 Foreground flow:
 - Run:

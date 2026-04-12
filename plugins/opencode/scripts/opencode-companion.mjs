@@ -4,9 +4,13 @@
 // Mirrors the codex-plugin-cc codex-companion.mjs architecture but uses
 // OpenCode's HTTP REST API instead of JSON-RPC over stdin/stdout.
 //
-// Modified by JohnnyVicious (2026): thread `--model` through `handleReview`
-// and `handleAdversarialReview` so callers can override OpenCode's default
-// model per review. (Apache License 2.0 §4(b) modification notice.)
+// Modified by JohnnyVicious (2026):
+//   - thread `--model` through `handleReview` and `handleAdversarialReview`
+//     so callers can override OpenCode's default model per review;
+//   - accept `--pr <N>` (with `PR #N` focus auto-detect for adversarial)
+//     and fetch PR diffs via `gh pr diff` so reviews can target a GitHub
+//     pull request without checking it out.
+// (Apache License 2.0 §4(b) modification notice.)
 
 import path from "node:path";
 import process from "node:process";
@@ -21,7 +25,7 @@ import { buildStatusSnapshot, resolveResultJob, resolveCancelableJob, enrichJob 
 import { createJobRecord, runTrackedJob, getClaudeSessionId } from "./lib/tracked-jobs.mjs";
 import { renderStatus, renderResult, renderReview, renderSetup } from "./lib/render.mjs";
 import { buildReviewPrompt, buildTaskPrompt } from "./lib/prompts.mjs";
-import { getDiff, getStatus as getGitStatus } from "./lib/git.mjs";
+import { getDiff, getStatus as getGitStatus, detectPrReference } from "./lib/git.mjs";
 import { readJson } from "./lib/fs.mjs";
 
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(import.meta.dirname, "..");
@@ -123,12 +127,22 @@ async function handleSetup(argv) {
 
 async function handleReview(argv) {
   const { options } = parseArgs(argv, {
-    valueOptions: ["base", "scope", "model"],
+    valueOptions: ["base", "scope", "model", "pr"],
     booleanOptions: ["wait", "background"],
   });
 
+  const prNumber = options.pr ? Number(options.pr) : null;
+  if (options.pr && !Number.isFinite(prNumber)) {
+    console.error(`Invalid --pr value: ${options.pr} (must be a number)`);
+    process.exit(1);
+  }
+
   const workspace = await resolveWorkspace();
-  const job = createJobRecord(workspace, "review", { base: options.base, model: options.model });
+  const job = createJobRecord(workspace, "review", {
+    base: options.base,
+    model: options.model,
+    pr: prNumber,
+  });
 
   try {
     const result = await runTrackedJob(workspace, job, async ({ report, log }) => {
@@ -141,11 +155,12 @@ async function handleReview(argv) {
 
       const prompt = await buildReviewPrompt(workspace, {
         base: options.base,
+        pr: prNumber,
         adversarial: false,
       }, PLUGIN_ROOT);
 
       report("reviewing", "Running review...");
-      log(`Prompt length: ${prompt.length} chars${options.model ? `, model: ${options.model}` : ""}`);
+      log(`Prompt length: ${prompt.length} chars${options.model ? `, model: ${options.model}` : ""}${prNumber ? `, pr: #${prNumber}` : ""}`);
 
       const response = await client.sendPrompt(session.id, prompt, {
         agent: "plan", // read-only agent for reviews
@@ -174,16 +189,36 @@ async function handleReview(argv) {
 
 async function handleAdversarialReview(argv) {
   const { options, positional } = parseArgs(argv, {
-    valueOptions: ["base", "scope", "model"],
+    valueOptions: ["base", "scope", "model", "pr"],
     booleanOptions: ["wait", "background"],
   });
 
-  const focus = positional.join(" ").trim();
+  let focus = positional.join(" ").trim();
+
+  // --pr <N> takes precedence; otherwise look for "PR #N" / "PR N" inside the
+  // focus text and strip it so the matched substring doesn't pollute the
+  // prompt with a stale instruction.
+  let prNumber = null;
+  if (options.pr) {
+    prNumber = Number(options.pr);
+    if (!Number.isFinite(prNumber)) {
+      console.error(`Invalid --pr value: ${options.pr} (must be a number)`);
+      process.exit(1);
+    }
+  } else {
+    const detected = detectPrReference(focus);
+    if (detected) {
+      prNumber = detected.prNumber;
+      focus = focus.replace(detected.matched, "").replace(/\s+/g, " ").trim();
+    }
+  }
+
   const workspace = await resolveWorkspace();
   const job = createJobRecord(workspace, "adversarial-review", {
     base: options.base,
     focus,
     model: options.model,
+    pr: prNumber,
   });
 
   try {
@@ -197,12 +232,13 @@ async function handleAdversarialReview(argv) {
 
       const prompt = await buildReviewPrompt(workspace, {
         base: options.base,
+        pr: prNumber,
         adversarial: true,
         focus,
       }, PLUGIN_ROOT);
 
       report("reviewing", "Running adversarial review...");
-      log(`Prompt length: ${prompt.length} chars, focus: ${focus || "(none)"}${options.model ? `, model: ${options.model}` : ""}`);
+      log(`Prompt length: ${prompt.length} chars, focus: ${focus || "(none)"}${options.model ? `, model: ${options.model}` : ""}${prNumber ? `, pr: #${prNumber}` : ""}`);
 
       const response = await client.sendPrompt(session.id, prompt, {
         agent: "plan",

@@ -1,8 +1,8 @@
 ---
 description: Run a steerable adversarial OpenCode review that challenges implementation and design decisions
-argument-hint: '[--wait|--background] [--base <ref>] [--model <id>] [focus area or custom review instructions]'
+argument-hint: '[--wait|--background] [--base <ref>] [--model <id>] [--pr <number>] [focus area or custom review instructions]'
 disable-model-invocation: true
-allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
+allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), Bash(gh:*), AskUserQuestion
 ---
 
 Run an adversarial OpenCode review through the shared built-in reviewer.
@@ -22,6 +22,7 @@ Execution mode rules:
   - For working-tree review, start with `git status --short --untracked-files=all`.
   - For working-tree review, also inspect both `git diff --shortstat --cached` and `git diff --shortstat`.
   - For base-branch review, use `git diff --shortstat <base>...HEAD`.
+  - For PR review (`--pr <N>` or a `PR #N` reference in the focus text), use `gh pr view <N> --json additions,deletions,changedFiles` and base the recommendation on those numbers (large PRs almost always go to background).
   - Treat untracked files or directories as reviewable work even when `git diff --shortstat` is empty.
   - Only conclude there is nothing to review when the relevant working-tree status is empty or the explicit branch diff is empty.
   - Recommend waiting only when the review is clearly tiny, roughly 1-2 files total and no sign of a broader directory-sized change.
@@ -33,10 +34,12 @@ Execution mode rules:
 
 Argument handling:
 - Preserve the user's arguments exactly.
-- Do not strip `--wait`, `--background`, or `--model` yourself.
+- Do not strip `--wait`, `--background`, `--model`, or `--pr` yourself.
 - Adversarial reviews support custom focus text. Any text after flags is treated as a focus area.
 - The companion script handles `--adversarial` internally.
 - `--model <id>` overrides OpenCode's default model for this single review (e.g. `--model openrouter/anthropic/claude-opus-4-6`). Pass it through verbatim if the user supplied it.
+- `--pr <number>` reviews a GitHub pull request via `gh pr diff` instead of the local working tree. The cwd must be a git repo whose remote points at the PR's repository, and `gh` must be installed and authenticated.
+- If the user mentions a PR reference in the focus text (e.g. `on PR #390`), the companion script auto-detects it and strips the matched substring from the focus. You do not need to do anything special — just pass the user's text through verbatim. Prefer the explicit `--pr` flag for new commands.
 
 Foreground flow:
 - Run:
