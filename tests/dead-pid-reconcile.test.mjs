@@ -9,7 +9,7 @@ import {
   reconcileAllJobs,
   buildStatusSnapshot,
 } from "../plugins/opencode/scripts/lib/job-control.mjs";
-import { upsertJob, loadState } from "../plugins/opencode/scripts/lib/state.mjs";
+import { upsertJob, loadState, saveState } from "../plugins/opencode/scripts/lib/state.mjs";
 import {
   getProcessStartToken,
   isProcessAlive,
@@ -64,13 +64,11 @@ describe("markDeadPidJobFailed", () => {
   });
 
   beforeEach(() => {
-    // Wipe state before each test.
-    const state = loadState(workspace);
-    state.jobs = [];
-    upsertJob(workspace, { id: "__seed__", status: "completed" });
-    const after = loadState(workspace);
-    after.jobs = [];
-    for (const j of after.jobs) {}
+    // Actually wipe on-disk state between tests. The prior mutator-only
+    // approach left entries from earlier tests in state.json, which made
+    // the suite order-dependent as soon as IDs collided or MAX_JOBS
+    // pruning kicked in.
+    saveState(workspace, { config: {}, jobs: [] });
   });
 
   it("rewrites a running job with a dead pid to failed", () => {

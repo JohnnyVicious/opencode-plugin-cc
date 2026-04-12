@@ -48,31 +48,54 @@ function truncateUtf8(text, maxBytes) {
  * @returns {Promise<string>}
  */
 export async function buildReviewPrompt(cwd, opts, pluginRoot) {
-  let diff, status, changedFiles;
-  let prInfo = null;
-  let diffStat = "";
-
-  if (opts.pr) {
-    prInfo = await getPrInfo(cwd, opts.pr);
-    diff = await getPrDiff(cwd, opts.pr);
-    status = ""; // PR review intentionally ignores the local working tree
-    changedFiles = prInfo.files;
-  } else {
-    diff = await getDiff(cwd, { base: opts.base });
-    status = await getStatus(cwd);
-    changedFiles = await getChangedFiles(cwd, { base: opts.base });
-    diffStat = await getDiffStat(cwd, { base: opts.base });
-  }
-
-  const diffBytes = Buffer.byteLength(diff || "", "utf8");
   const maxFiles = Number.isFinite(opts.maxInlineDiffFiles)
     ? opts.maxInlineDiffFiles
     : DEFAULT_INLINE_DIFF_MAX_FILES;
   const maxBytes = Number.isFinite(opts.maxInlineDiffBytes)
     ? opts.maxInlineDiffBytes
     : DEFAULT_INLINE_DIFF_MAX_BYTES;
+
+  let diff = "";
+  let status = "";
+  let changedFiles = [];
+  let prInfo = null;
+  let diffStat = "";
+  let overByteLimit = false;
+
+  // Step 1: cheap metadata. The status / changed-file list / shortstat
+  // reads do not materialize the full diff and are safe on any size.
+  if (opts.pr) {
+    prInfo = await getPrInfo(cwd, opts.pr);
+    status = ""; // PR review intentionally ignores the local working tree
+    changedFiles = prInfo.files;
+  } else {
+    status = await getStatus(cwd);
+    changedFiles = await getChangedFiles(cwd, { base: opts.base });
+    diffStat = await getDiffStat(cwd, { base: opts.base });
+  }
+
+  // Step 2: fetch the diff body, but bound the read at maxBytes + 1. If
+  // the git/gh subprocess would produce more bytes than that, the helper
+  // reports `overflowed: true` and we treat the diff as over the byte
+  // limit without ever materializing the rest. Past this point we know
+  // the diff string in memory is at most maxBytes + 1 bytes.
+  const readCap = maxBytes + 1;
+  if (opts.pr) {
+    const pr = await getPrDiff(cwd, opts.pr, { maxBytes: readCap });
+    diff = pr.stdout;
+    overByteLimit = pr.overflowed;
+  } else {
+    const wt = await getDiff(cwd, { base: opts.base, maxBytes: readCap });
+    diff = wt.stdout;
+    overByteLimit = wt.overflowed;
+  }
+
   const overFileLimit = changedFiles.length > maxFiles;
-  const overByteLimit = diffBytes > maxBytes;
+
+  // The "original" diff byte count is used for the user-facing context
+  // note. When we overflowed the read, we don't know the true size — use
+  // the cap as a lower bound.
+  const diffBytes = overByteLimit ? readCap : Buffer.byteLength(diff, "utf8");
   const diffIsComplete = !overByteLimit;
   const diffForPrompt = overByteLimit ? truncateUtf8(diff, maxBytes) : diff;
   const collectionGuidance = buildCollectionGuidance(diffIsComplete);

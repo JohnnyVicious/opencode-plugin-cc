@@ -100,6 +100,35 @@ describe("buildReviewPrompt large-diff fallback", () => {
     assert.doesNotMatch(prompt, /bounded diff excerpt/);
   });
 
+  it("bounds the diff read so huge diffs never fully materialize", async () => {
+    // Create a file whose modification generates a diff much larger than the
+    // inline cap. With the bounded-read fix the diff fetch should stop early
+    // and report overflowed, producing a lightweight excerpt — not a full
+    // in-memory materialization of the multi-megabyte diff.
+    const big = "x".repeat(50_000);
+    fs.writeFileSync(path.join(tmpDir, "a.js"), `export const a = '${big}';\n`);
+
+    const prompt = await buildReviewPrompt(
+      tmpDir,
+      {
+        adversarial: true,
+        focus: "test",
+        maxInlineDiffFiles: 100,
+        maxInlineDiffBytes: 2048, // 2 KB cap
+      },
+      PLUGIN_ROOT
+    );
+
+    // The excerpt-marker must be present and the x-heavy content must not
+    // have fully landed in the prompt (we would see >= 50000 x's otherwise).
+    assert.match(prompt, /bounded diff excerpt/);
+    const xCount = (prompt.match(/x/g) ?? []).length;
+    assert.ok(
+      xCount < 10_000,
+      `expected bounded diff, but saw ${xCount} 'x' chars in prompt`
+    );
+  });
+
   it("injects collection guidance into adversarial template", async () => {
     fs.writeFileSync(path.join(tmpDir, "a.js"), "export const a = 'XXXX';\n");
 

@@ -83,11 +83,18 @@ export async function getOpencodeVersion() {
 }
 
 /**
- * Run a command and return { stdout, stderr, exitCode }.
+ * Run a command and return { stdout, stderr, exitCode, overflowed }.
+ *
+ * Supports bounded output reads via `opts.maxOutputBytes`. When that cap is
+ * set and the child's stdout would exceed it, the child is killed and the
+ * returned `overflowed` flag is set to `true`. This lets callers probe
+ * potentially-huge outputs (e.g. `git diff` for a big changeset) without
+ * materializing the whole buffer in memory.
+ *
  * @param {string} cmd
  * @param {string[]} args
- * @param {object} [opts]
- * @returns {Promise<{ stdout: string, stderr: string, exitCode: number }>}
+ * @param {{ cwd?: string, env?: object, maxOutputBytes?: number }} [opts]
+ * @returns {Promise<{ stdout: string, stderr: string, exitCode: number, overflowed: boolean }>}
  */
 export function runCommand(cmd, args, opts = {}) {
   return new Promise((resolve) => {
@@ -98,11 +105,45 @@ export function runCommand(cmd, args, opts = {}) {
       shell: platformShellOption(),
       windowsHide: true,
     });
+
+    const maxOutputBytes = Number.isFinite(opts.maxOutputBytes) && opts.maxOutputBytes > 0
+      ? opts.maxOutputBytes
+      : null;
     let stdout = "";
+    let stdoutBytes = 0;
     let stderr = "";
-    proc.stdout.on("data", (d) => (stdout += d));
+    let overflowed = false;
+
+    proc.stdout.on("data", (chunk) => {
+      if (overflowed) return;
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      stdoutBytes += buf.length;
+      if (maxOutputBytes !== null && stdoutBytes > maxOutputBytes) {
+        overflowed = true;
+        // Keep whatever we've seen up to the cap, then kill the child.
+        const keep = maxOutputBytes - (stdoutBytes - buf.length);
+        if (keep > 0) stdout += buf.slice(0, keep).toString("utf8");
+        try {
+          proc.kill("SIGTERM");
+        } catch {
+          // best-effort; ignore
+        }
+        return;
+      }
+      stdout += buf.toString("utf8");
+    });
     proc.stderr.on("data", (d) => (stderr += d));
-    proc.on("close", (exitCode) => resolve({ stdout, stderr, exitCode: exitCode ?? 1 }));
+    proc.on("close", (exitCode) =>
+      resolve({
+        stdout,
+        stderr,
+        // When we killed the child for overflow the exit code is not
+        // meaningful — surface a synthetic 0 so callers can still consume
+        // the partial stdout via the overflowed flag.
+        exitCode: overflowed ? 0 : exitCode ?? 1,
+        overflowed,
+      })
+    );
   });
 }
 

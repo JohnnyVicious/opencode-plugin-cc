@@ -40,9 +40,14 @@ export async function getCurrentBranch(cwd) {
 
 /**
  * Get the diff for review, supporting base-branch and working-tree modes.
+ *
+ * When `opts.maxBytes` is set, the read is bounded at that cap. The returned
+ * shape gains an `overflowed` flag in that case so callers can tell the
+ * difference between "small diff, all of it" and "big diff, first N bytes".
+ *
  * @param {string} cwd
- * @param {{ base?: string, cached?: boolean }} opts
- * @returns {Promise<string>}
+ * @param {{ base?: string, cached?: boolean, maxBytes?: number }} opts
+ * @returns {Promise<{ stdout: string, overflowed: boolean }>}
  */
 export async function getDiff(cwd, opts = {}) {
   const args = ["diff"];
@@ -51,8 +56,11 @@ export async function getDiff(cwd, opts = {}) {
   } else if (opts.cached) {
     args.push("--cached");
   }
-  const { stdout } = await runCommand("git", args, { cwd });
-  return stdout;
+  const result = await runCommand("git", args, {
+    cwd,
+    maxOutputBytes: opts.maxBytes,
+  });
+  return { stdout: result.stdout, overflowed: Boolean(result.overflowed) };
 }
 
 /**
@@ -70,22 +78,6 @@ export async function getDiffStat(cwd, opts = {}) {
   }
   const { stdout } = await runCommand("git", args, { cwd });
   return stdout.trim();
-}
-
-/**
- * Measure the byte size of a git diff without streaming the full contents
- * back to the caller. Useful for "is this diff too big to inline?" checks.
- *
- * @param {string} cwd
- * @param {{ base?: string, cached?: boolean }} [opts]
- * @returns {Promise<number>}
- */
-export async function getDiffByteSize(cwd, opts = {}) {
-  const args = ["diff"];
-  if (opts.base) args.push(`${opts.base}...HEAD`);
-  else if (opts.cached) args.push("--cached");
-  const { stdout } = await runCommand("git", args, { cwd });
-  return Buffer.byteLength(stdout, "utf8");
 }
 
 /**
@@ -177,20 +169,27 @@ export async function getPrInfo(cwd, prNumber) {
 
 /**
  * Fetch the unified diff for a pull request via `gh pr diff`.
+ *
+ * When `opts.maxBytes` is set, the read is bounded at that cap. `overflowed`
+ * reports whether the full diff exceeded the cap — callers can then decide
+ * to short-circuit to lightweight-mode without materializing the rest.
+ *
  * @param {string} cwd
  * @param {number} prNumber
- * @returns {Promise<string>}
+ * @param {{ maxBytes?: number }} [opts]
+ * @returns {Promise<{ stdout: string, overflowed: boolean }>}
  */
-export async function getPrDiff(cwd, prNumber) {
-  const { stdout, stderr, exitCode } = await runCommand(
+export async function getPrDiff(cwd, prNumber, opts = {}) {
+  const { stdout, stderr, exitCode, overflowed } = await runCommand(
     "gh",
     ["pr", "diff", String(prNumber)],
-    { cwd }
+    { cwd, maxOutputBytes: opts.maxBytes }
   );
-  if (exitCode !== 0) {
+  // An overflow kill is not a real failure — we got the bytes we wanted.
+  if (exitCode !== 0 && !overflowed) {
     throw new Error(`gh pr diff ${prNumber} failed: ${stderr.trim() || "unknown error"}`);
   }
-  return stdout;
+  return { stdout, overflowed: Boolean(overflowed) };
 }
 
 // ------------------------------------------------------------------

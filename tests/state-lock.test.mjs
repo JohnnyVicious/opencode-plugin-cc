@@ -4,7 +4,7 @@ import { fork } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createTmpDir, cleanupTmpDir, setupTestEnv } from "./helpers.mjs";
 import {
   loadState,
@@ -15,6 +15,10 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const stateModulePath = path.resolve(__dirname, "..", "plugins", "opencode", "scripts", "lib", "state.mjs");
+// Module specifiers in generated ESM source must be valid URLs. On Windows
+// the resolved path contains backslashes and a drive letter, which would be
+// an invalid specifier / emit escape sequences inside the generated import.
+const stateModuleSpecifier = pathToFileURL(stateModulePath).href;
 
 let tmpDir;
 const workspace = "/lock-test/workspace";
@@ -89,7 +93,7 @@ describe("updateState lock", () => {
 
     fs.writeFileSync(
       script,
-      `import { upsertJob } from "${stateModulePath}";\n` +
+      `import { upsertJob } from "${stateModuleSpecifier}";\n` +
       `import fs from "node:fs";\n` +
       `process.env.CLAUDE_PLUGIN_DATA = "${dataDir}";\n` +
       `process.env.OPENCODE_COMPANION_SESSION_ID = "child-session";\n` +
