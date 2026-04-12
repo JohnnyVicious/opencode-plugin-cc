@@ -100,4 +100,36 @@ describe("worktree session", () => {
     assert.equal(result.detail, "No changes to apply.");
     assert.equal(fs.existsSync(session.worktreePath), false);
   });
+
+  it("refuses to create a worktree while a merge is in progress", async () => {
+    fs.writeFileSync(path.join(repo, ".git", "MERGE_HEAD"), "deadbeef\n");
+    await assert.rejects(
+      createWorktreeSession(repo),
+      /in-progress merge/i
+    );
+  });
+
+  it("preserves the patch file and worktree when keep apply fails", async () => {
+    const session = await createWorktreeSession(repo);
+    try {
+      fs.writeFileSync(
+        path.join(session.worktreePath, "a.js"),
+        "export const a = 'WORKTREE';\n"
+      );
+      fs.writeFileSync(path.join(repo, "a.js"), "export const a = 'MAIN';\n");
+
+      const result = await cleanupWorktreeSession(session, { keep: true });
+      assert.equal(result.applied, false);
+      assert.match(result.detail, /Preserved patch:/);
+      assert.match(result.detail, /Hint:/);
+      assert.equal(fs.existsSync(session.worktreePath), true);
+
+      const patchPath = result.detail.match(/Preserved patch: (.+)/)?.[1]?.trim();
+      assert.ok(patchPath, "detail did not include a preserved patch path");
+      assert.equal(fs.existsSync(patchPath), true);
+      fs.rmSync(patchPath, { force: true });
+    } finally {
+      await cleanupWorktreeSession(session, { keep: false }).catch(() => {});
+    }
+  });
 });

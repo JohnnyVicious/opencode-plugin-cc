@@ -7,6 +7,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { runCommand } from "./process.mjs";
 
 /**
@@ -196,6 +197,87 @@ export async function getPrDiff(cwd, prNumber) {
 // Worktree helpers (for --worktree isolated rescue runs)
 // ------------------------------------------------------------------
 
+function isPathPresent(targetPath) {
+  try {
+    fs.lstatSync(targetPath);
+    return true;
+  } catch (err) {
+    if (err?.code === "ENOENT") return false;
+    throw err;
+  }
+}
+
+async function getGitPath(repoRoot, gitPath) {
+  const result = await runCommand("git", ["rev-parse", "--git-path", gitPath], { cwd: repoRoot });
+  if (result.exitCode !== 0) {
+    throw new Error(`git rev-parse --git-path ${gitPath} failed: ${result.stderr.trim()}`);
+  }
+  return path.resolve(repoRoot, result.stdout.trim());
+}
+
+async function assertNoInProgressGitOperation(repoRoot) {
+  const checks = [
+    ["merge", "MERGE_HEAD"],
+    ["rebase", "REBASE_HEAD"],
+    ["rebase", "rebase-merge"],
+    ["rebase", "rebase-apply"],
+    ["bisect", "BISECT_LOG"],
+  ];
+
+  for (const [operation, gitPath] of checks) {
+    const marker = await getGitPath(repoRoot, gitPath);
+    if (isPathPresent(marker)) {
+      throw new Error(
+        `Cannot create an OpenCode worktree while the repository has an in-progress ${operation}. ` +
+        `Finish or abort it first (${gitPath} exists).`
+      );
+    }
+  }
+}
+
+async function branchExists(repoRoot, branch) {
+  const result = await runCommand(
+    "git",
+    ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
+    { cwd: repoRoot }
+  );
+  return result.exitCode === 0;
+}
+
+async function pruneStaleOpencodeWorktrees(repoRoot) {
+  await runCommand("git", ["worktree", "prune"], { cwd: repoRoot });
+
+  const listResult = await runCommand("git", ["worktree", "list", "--porcelain"], { cwd: repoRoot });
+  const activeBranches = new Set();
+  for (const line of listResult.stdout.split(/\r?\n/)) {
+    const match = line.match(/^branch refs\/heads\/(.+)$/);
+    if (match) activeBranches.add(match[1]);
+  }
+
+  const branchResult = await runCommand(
+    "git",
+    ["for-each-ref", "--format=%(refname:short)", "refs/heads/opencode"],
+    { cwd: repoRoot }
+  );
+  if (branchResult.exitCode !== 0) return;
+
+  for (const branch of branchResult.stdout.trim().split(/\r?\n/).filter(Boolean)) {
+    if (activeBranches.has(branch)) continue;
+    const merged = await runCommand(
+      "git",
+      ["merge-base", "--is-ancestor", branch, "HEAD"],
+      { cwd: repoRoot }
+    );
+    if (merged.exitCode === 0) {
+      await deleteWorktreeBranch(repoRoot, branch);
+    }
+  }
+}
+
+function makeWorktreeId() {
+  return `${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+}
+
 /**
  * Create a disposable git worktree under `<repoRoot>/.worktrees/opencode-<ts>`
  * on a new `opencode/<ts>` branch. Also adds `.worktrees/` to the repo's
@@ -205,14 +287,14 @@ export async function getPrDiff(cwd, prNumber) {
  * @returns {Promise<{ worktreePath: string, branch: string, repoRoot: string, baseCommit: string, timestamp: number }>}
  */
 export async function createWorktree(repoRoot) {
-  const ts = Date.now();
+  await assertNoInProgressGitOperation(repoRoot);
+  await pruneStaleOpencodeWorktrees(repoRoot);
+
   const worktreesDir = path.join(repoRoot, ".worktrees");
-  fs.mkdirSync(worktreesDir, { recursive: true });
+  fs.mkdirSync(worktreesDir, { recursive: true, mode: 0o700 });
 
   // Resolve the real git dir (handles linked worktrees where .git is a file).
-  const gitDirResult = await runCommand("git", ["rev-parse", "--git-dir"], { cwd: repoRoot });
-  const rawGitDir = gitDirResult.stdout.trim();
-  const gitDir = path.resolve(repoRoot, rawGitDir);
+  const gitDir = await getGitPath(repoRoot, ".");
   const excludePath = path.join(gitDir, "info", "exclude");
   const existing = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, "utf8") : "";
   if (!existing.includes(".worktrees")) {
@@ -221,24 +303,35 @@ export async function createWorktree(repoRoot) {
     fs.appendFileSync(excludePath, `${sep}.worktrees/\n`);
   }
 
-  const worktreePath = path.join(worktreesDir, `opencode-${ts}`);
-  const branch = `opencode/${ts}`;
   const baseCommitResult = await runCommand("git", ["rev-parse", "HEAD"], { cwd: repoRoot });
   if (baseCommitResult.exitCode !== 0) {
     throw new Error(`git rev-parse HEAD failed: ${baseCommitResult.stderr.trim()}`);
   }
   const baseCommit = baseCommitResult.stdout.trim();
 
-  const addResult = await runCommand(
-    "git",
-    ["worktree", "add", worktreePath, "-b", branch],
-    { cwd: repoRoot }
-  );
-  if (addResult.exitCode !== 0) {
-    throw new Error(`git worktree add failed: ${addResult.stderr.trim()}`);
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const id = makeWorktreeId();
+    const worktreePath = path.join(worktreesDir, `opencode-${id}`);
+    const branch = `opencode/${id}`;
+    if (fs.existsSync(worktreePath) || await branchExists(repoRoot, branch)) {
+      continue;
+    }
+
+    const addResult = await runCommand(
+      "git",
+      ["worktree", "add", worktreePath, "-b", branch],
+      { cwd: repoRoot }
+    );
+    if (addResult.exitCode === 0) {
+      return { worktreePath, branch, repoRoot, baseCommit, timestamp: Date.now() };
+    }
+
+    if (!/already exists|is already checked out|invalid reference/i.test(addResult.stderr)) {
+      throw new Error(`git worktree add failed: ${addResult.stderr.trim()}`);
+    }
   }
 
-  return { worktreePath, branch, repoRoot, baseCommit, timestamp: ts };
+  throw new Error("Unable to allocate a unique OpenCode worktree after 5 attempts.");
 }
 
 /**
@@ -308,6 +401,7 @@ export async function applyWorktreePatch(repoRoot, worktreePath, baseCommit) {
     repoRoot,
     `.opencode-worktree-${Date.now()}-${Math.random().toString(16).slice(2)}.patch`
   );
+  let applied = false;
   try {
     fs.writeFileSync(patchPath, patchR.stdout, "utf8");
     const applyR = await runCommand(
@@ -316,13 +410,33 @@ export async function applyWorktreePatch(repoRoot, worktreePath, baseCommit) {
       { cwd: repoRoot }
     );
     if (applyR.exitCode !== 0) {
+      const stderr = applyR.stderr.trim();
       return {
         applied: false,
-        detail: applyR.stderr.trim() || "Patch apply failed (conflicts?).",
+        detail: formatApplyFailureDetail(stderr, patchPath),
       };
     }
+    applied = true;
     return { applied: true, detail: "Changes applied and staged." };
   } finally {
-    fs.rmSync(patchPath, { force: true });
+    if (applied) {
+      fs.rmSync(patchPath, { force: true });
+    }
   }
+}
+
+function formatApplyFailureDetail(stderr, patchPath) {
+  const detail = stderr || "Patch apply failed.";
+  const lower = detail.toLowerCase();
+  let hint = "Resolve the conflict manually, then retry with `git apply --index`.";
+  if (lower.includes("binary patch") || lower.includes("without full index line")) {
+    hint = "The patch appears to include binary changes; inspect the preserved worktree and copy binary files manually.";
+  } else if (lower.includes("standard format") || lower.includes("corrupt patch")) {
+    hint = "The generated patch is not in a format git can apply; inspect or edit the preserved patch before retrying.";
+  } else if (lower.includes("permission denied")) {
+    hint = "Git could not read or write a target path; check file permissions before retrying.";
+  } else if (lower.includes("does not apply") || lower.includes("patch failed")) {
+    hint = "The target files diverged; edit the preserved patch or apply the changes manually.";
+  }
+  return `${detail}\nPreserved patch: ${patchPath}\nHint: ${hint}`;
 }

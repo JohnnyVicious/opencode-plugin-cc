@@ -11,9 +11,122 @@ import { ensureDir, readJson, writeJson } from "./fs.mjs";
 const MAX_JOBS = 50;
 
 const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "opencode-companion");
+const MIGRATION_LOCK_STALE_MS = 5 * 60 * 1000;
+const MIGRATION_WAIT_MS = 2000;
+const PATH_KEYS = new Set(["logFile", "dataFile"]);
 
 function workspaceHash(workspacePath) {
   return crypto.createHash("sha256").update(workspacePath).digest("hex").slice(0, 16);
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function waitForMigration(primaryState) {
+  const deadline = Date.now() + MIGRATION_WAIT_MS;
+  while (!fs.existsSync(primaryState) && Date.now() < deadline) {
+    sleepSync(25);
+  }
+}
+
+function acquireMigrationLock(lockPath, primaryState) {
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
+  try {
+    return fs.openSync(lockPath, "wx");
+  } catch (err) {
+    if (err?.code !== "EEXIST") throw err;
+
+    try {
+      const stat = fs.statSync(lockPath);
+      if (Date.now() - stat.mtimeMs > MIGRATION_LOCK_STALE_MS) {
+        fs.rmSync(lockPath, { force: true });
+        return fs.openSync(lockPath, "wx");
+      }
+    } catch (statErr) {
+      if (statErr?.code !== "ENOENT") throw statErr;
+    }
+
+    waitForMigration(primaryState);
+    return null;
+  }
+}
+
+function assertSafeMigrationTree(dir) {
+  for (const entry of fs.readdirSync(dir)) {
+    const entryPath = path.join(dir, entry);
+    const stat = fs.lstatSync(entryPath);
+    if (stat.isSymbolicLink()) {
+      throw new Error(`Refusing to migrate state containing symlink: ${entryPath}`);
+    }
+    if (stat.isDirectory()) {
+      assertSafeMigrationTree(entryPath);
+    } else if (!stat.isFile()) {
+      throw new Error(`Refusing to migrate non-regular state file: ${entryPath}`);
+    }
+  }
+}
+
+function chmodPrivateRecursive(dir) {
+  fs.chmodSync(dir, 0o700);
+  for (const entry of fs.readdirSync(dir)) {
+    const entryPath = path.join(dir, entry);
+    const stat = fs.lstatSync(entryPath);
+    if (stat.isDirectory()) {
+      chmodPrivateRecursive(entryPath);
+    } else if (stat.isFile()) {
+      fs.chmodSync(entryPath, 0o600);
+    }
+  }
+}
+
+function rewritePathPrefix(value, fallbackDir, primaryDir) {
+  if (typeof value !== "string") return value;
+  if (value === fallbackDir) return primaryDir;
+  const boundary = fallbackDir.endsWith(path.sep) ? fallbackDir : `${fallbackDir}${path.sep}`;
+  if (value.startsWith(boundary)) {
+    return path.join(primaryDir, value.slice(boundary.length));
+  }
+  return value;
+}
+
+function rewriteKnownPathValues(value, fallbackDir, primaryDir, key = null) {
+  if (Array.isArray(value)) {
+    return value.map((item) => rewriteKnownPathValues(item, fallbackDir, primaryDir));
+  }
+  if (value && typeof value === "object") {
+    const rewritten = {};
+    for (const [childKey, childValue] of Object.entries(value)) {
+      rewritten[childKey] = rewriteKnownPathValues(childValue, fallbackDir, primaryDir, childKey);
+    }
+    return rewritten;
+  }
+  return PATH_KEYS.has(key) ? rewritePathPrefix(value, fallbackDir, primaryDir) : value;
+}
+
+function rewriteJsonPathFile(filePath, fallbackDir, primaryDir) {
+  try {
+    const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    const rewritten = rewriteKnownPathValues(data, fallbackDir, primaryDir);
+    fs.writeFileSync(filePath, `${JSON.stringify(rewritten, null, 2)}\n`, "utf8");
+  } catch {
+    // non-fatal — malformed job data should not prevent state migration
+  }
+}
+
+function rewriteMigratedJsonPaths(rootDir, fallbackDir, primaryDir) {
+  const stack = [rootDir];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const entryPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(entryPath);
+      } else if (entry.isFile() && entry.name.endsWith(".json")) {
+        rewriteJsonPathFile(entryPath, fallbackDir, primaryDir);
+      }
+    }
+  }
 }
 
 /**
@@ -30,39 +143,41 @@ function migrateTmpdirStateIfNeeded(fallbackDir, primaryDir) {
   const fallbackState = path.join(fallbackDir, "state.json");
   if (fs.existsSync(primaryState) || !fs.existsSync(fallbackState)) return;
 
+  const lockPath = `${primaryDir}.migrate.lock`;
+  const stageDir = `${primaryDir}.migrate-${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+  let lockFd = null;
   try {
-    fs.mkdirSync(primaryDir, { recursive: true });
-    fs.cpSync(fallbackDir, primaryDir, { recursive: true });
+    lockFd = acquireMigrationLock(lockPath, primaryState);
+    if (lockFd === null) return;
+    if (fs.existsSync(primaryState) || !fs.existsSync(fallbackState)) return;
 
-    const escapedFallback = fallbackDir.replaceAll("\\", "\\\\");
-    const escapedPrimary = primaryDir.replaceAll("\\", "\\\\");
-    const rewritePaths = (filePath) => {
-      try {
-        let txt = fs.readFileSync(filePath, "utf8");
-        const original = txt;
-        txt = txt.replaceAll(fallbackDir, primaryDir);
-        if (escapedFallback !== fallbackDir) {
-          txt = txt.replaceAll(escapedFallback, escapedPrimary);
-        }
-        if (txt !== original) fs.writeFileSync(filePath, txt, "utf8");
-      } catch {
-        // non-fatal — migration is best-effort
-      }
-    };
+    assertSafeMigrationTree(fallbackDir);
+    fs.rmSync(stageDir, { recursive: true, force: true });
+    fs.cpSync(fallbackDir, stageDir, {
+      recursive: true,
+      verbatimSymlinks: true,
+    });
+    rewriteMigratedJsonPaths(stageDir, fallbackDir, primaryDir);
+    chmodPrivateRecursive(stageDir);
 
-    rewritePaths(primaryState);
-    const jobsDir = path.join(primaryDir, "jobs");
-    if (fs.existsSync(jobsDir)) {
-      for (const entry of fs.readdirSync(jobsDir)) {
-        if (entry.endsWith(".json")) {
-          rewritePaths(path.join(jobsDir, entry));
-        }
-      }
+    if (fs.existsSync(primaryDir) && !fs.existsSync(primaryState)) {
+      fs.rmSync(primaryDir, { recursive: true, force: true });
     }
+    fs.renameSync(stageDir, primaryDir);
   } catch {
     // If migration fails for any reason, fall through and let the caller
     // operate on whatever state is visible. A failed migration must never
     // crash a status/cancel call.
+  } finally {
+    fs.rmSync(stageDir, { recursive: true, force: true });
+    if (lockFd !== null) {
+      try {
+        fs.closeSync(lockFd);
+      } catch {
+        // best-effort
+      }
+      fs.rmSync(lockPath, { force: true });
+    }
   }
 }
 

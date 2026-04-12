@@ -981,7 +981,7 @@ async function handleCancel(argv) {
  */
 function lastReviewPath(workspace) {
   const hash = crypto.createHash("sha256").update(workspace).digest("hex").slice(0, 16);
-  const dir = path.join(os.homedir(), ".opencode-companion");
+  const dir = process.env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), ".opencode-companion");
   return { dir, file: path.join(dir, `last-review-${hash}.md`) };
 }
 
@@ -993,12 +993,18 @@ function lastReviewPath(workspace) {
  */
 function saveLastReview(workspace, rendered) {
   if (!rendered) return;
+  let tmp = null;
   try {
     const { dir, file } = lastReviewPath(workspace);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(file, rendered, "utf8");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmp, rendered, "utf8");
+    fs.renameSync(tmp, file);
+    tmp = null;
   } catch {
     // best-effort
+  } finally {
+    if (tmp) fs.rmSync(tmp, { force: true });
   }
 }
 

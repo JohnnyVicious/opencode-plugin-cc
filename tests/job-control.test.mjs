@@ -112,4 +112,14 @@ describe("job-control", () => {
     assert.ok(snapshot.latestFinished);
     assert.equal(snapshot.recent.length, 2);
   });
+
+  it("buildStatusSnapshot treats pending jobs as active, not finished", () => {
+    const pendingJobs = [
+      { id: "task-pending", status: "pending", type: "task", updatedAt: "2026-01-01T03:00:00Z", createdAt: "2026-01-01T03:00:00Z" },
+      ...jobs,
+    ];
+    const snapshot = buildStatusSnapshot(pendingJobs, "/tmp/test");
+    assert.equal(snapshot.running.some((j) => j.id === "task-pending"), true);
+    assert.equal(snapshot.recent.some((j) => j.id === "task-pending"), false);
+  });
 });

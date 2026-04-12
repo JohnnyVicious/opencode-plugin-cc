@@ -10,7 +10,10 @@ import {
   buildStatusSnapshot,
 } from "../plugins/opencode/scripts/lib/job-control.mjs";
 import { upsertJob, loadState } from "../plugins/opencode/scripts/lib/state.mjs";
-import { isProcessAlive } from "../plugins/opencode/scripts/lib/process.mjs";
+import {
+  getProcessStartToken,
+  isProcessAlive,
+} from "../plugins/opencode/scripts/lib/process.mjs";
 
 // PID 999999 is virtually guaranteed to be dead on macOS/Linux (well above
 // pid_max for typical configurations and any short-lived workload).
@@ -27,6 +30,12 @@ describe("isProcessAlive", () => {
 
   it("returns true for the current process", () => {
     assert.equal(isProcessAlive(process.pid), true);
+  });
+
+  it("returns false when the PID start token does not match", () => {
+    const token = getProcessStartToken(process.pid);
+    if (!token) return;
+    assert.equal(isProcessAlive(process.pid, `${token}-stale`), false);
   });
 
   it("returns false for a clearly dead pid", () => {
@@ -109,6 +118,21 @@ describe("markDeadPidJobFailed", () => {
     const stored = loadState(workspace).jobs.find((j) => j.id === "task-3");
     assert.equal(stored.status, "running");
   });
+
+  it("refuses when the pid start token has changed since probe", () => {
+    upsertJob(workspace, {
+      id: "task-4",
+      status: "running",
+      type: "task",
+      pid: 12345,
+      pidStartToken: "start-a",
+    });
+    const written = markDeadPidJobFailed(workspace, "task-4", 12345, "start-b");
+    assert.equal(written, false);
+
+    const stored = loadState(workspace).jobs.find((j) => j.id === "task-4");
+    assert.equal(stored.status, "running");
+  });
 });
 
 describe("reconcileIfDead", () => {
@@ -160,6 +184,25 @@ describe("reconcileIfDead", () => {
     });
     assert.equal(result.status, "failed");
     assert.equal(result.phase, "failed");
+  });
+
+  it("honors OPENCODE_COMPANION_NO_RECONCILE", () => {
+    const previous = process.env.OPENCODE_COMPANION_NO_RECONCILE;
+    process.env.OPENCODE_COMPANION_NO_RECONCILE = "1";
+    try {
+      upsertJob(workspace, {
+        id: "dead-opt-out",
+        status: "running",
+        type: "task",
+        pid: DEAD_PID,
+      });
+      const job = { id: "dead-opt-out", status: "running", pid: DEAD_PID };
+      const result = reconcileIfDead(workspace, job);
+      assert.equal(result, job);
+    } finally {
+      if (previous == null) delete process.env.OPENCODE_COMPANION_NO_RECONCILE;
+      else process.env.OPENCODE_COMPANION_NO_RECONCILE = previous;
+    }
   });
 
   it("leaves running jobs with no pid alone", () => {

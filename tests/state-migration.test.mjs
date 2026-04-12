@@ -90,7 +90,11 @@ describe("stateRoot tmpdir → plugin-data migration", () => {
     const jobFile = path.join(jobsDir, "j1.json");
     fs.writeFileSync(
       jobFile,
-      JSON.stringify({ id: "j1", logFile: path.join(fallbackDir, "jobs", "j1.log") }),
+      JSON.stringify({
+        id: "j1",
+        logFile: path.join(fallbackDir, "jobs", "j1.log"),
+        errorMessage: `do not rewrite ordinary text mentioning ${fallbackDir}`,
+      }),
       "utf8"
     );
 
@@ -104,6 +108,37 @@ describe("stateRoot tmpdir → plugin-data migration", () => {
       `logFile not rewritten: ${migratedJob.logFile}`
     );
     assert.ok(!migratedJob.logFile.startsWith(fallbackDir));
+    assert.equal(
+      migratedJob.errorMessage,
+      `do not rewrite ordinary text mentioning ${fallbackDir}`
+    );
+  });
+
+  it("migrates with private directory and file modes on POSIX", () => {
+    if (process.platform === "win32") return;
+
+    delete process.env.CLAUDE_PLUGIN_DATA;
+    upsertJob(workspace, { id: "mode-check", status: "completed" });
+
+    process.env.CLAUDE_PLUGIN_DATA = dataDir;
+    const primaryDir = stateRoot(workspace);
+    const primaryState = path.join(primaryDir, "state.json");
+
+    assert.equal(fs.statSync(primaryDir).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(primaryState).mode & 0o777, 0o600);
+  });
+
+  it("refuses to migrate fallback state containing symlinks", () => {
+    if (process.platform === "win32") return;
+
+    delete process.env.CLAUDE_PLUGIN_DATA;
+    upsertJob(workspace, { id: "symlink-check", status: "completed" });
+    const fallbackDir = stateRoot(workspace);
+    fs.symlinkSync("/etc/passwd", path.join(fallbackDir, "leak"));
+
+    process.env.CLAUDE_PLUGIN_DATA = dataDir;
+    const primaryDir = stateRoot(workspace);
+    assert.equal(fs.existsSync(path.join(primaryDir, "state.json")), false);
   });
 
   it("does not re-migrate when primary state already exists", () => {

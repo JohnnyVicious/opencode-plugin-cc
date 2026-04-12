@@ -5,7 +5,11 @@ import { jobLogPath, loadState, upsertJob } from "./state.mjs";
 import { isProcessAlive } from "./process.mjs";
 
 function isActiveJobStatus(status) {
-  return status === "queued" || status === "running";
+  return status !== "completed" && status !== "failed";
+}
+
+function shouldReconcileDeadPids() {
+  return !/^(1|true|yes)$/i.test(process.env.OPENCODE_COMPANION_NO_RECONCILE ?? "");
 }
 
 /**
@@ -16,9 +20,10 @@ function isActiveJobStatus(status) {
  * @param {string} workspacePath
  * @param {string} jobId
  * @param {number} pid - the pid we observed as dead
+ * @param {string|null} [pidStartToken] - the process-start token observed as dead
  * @returns {boolean} true if a write happened
  */
-export function markDeadPidJobFailed(workspacePath, jobId, pid) {
+export function markDeadPidJobFailed(workspacePath, jobId, pid, pidStartToken = null) {
   const latest = loadState(workspacePath).jobs?.find((j) => j.id === jobId);
   if (!latest) return false;
 
@@ -29,12 +34,16 @@ export function markDeadPidJobFailed(workspacePath, jobId, pid) {
   // against a job that legitimately restarted with a new PID between the
   // probe and the write.
   if (latest.pid !== pid) return false;
+  if (pidStartToken && latest.pidStartToken && latest.pidStartToken !== pidStartToken) {
+    return false;
+  }
 
   upsertJob(workspacePath, {
     id: jobId,
     status: "failed",
     phase: "failed",
     pid: null,
+    pidStartToken: null,
     errorMessage: `Tracked process PID ${pid} exited unexpectedly without writing a terminal status.`,
     completedAt: new Date().toISOString(),
   });
@@ -53,13 +62,14 @@ export function markDeadPidJobFailed(workspacePath, jobId, pid) {
  * @returns {object}
  */
 export function reconcileIfDead(workspacePath, job) {
+  if (!shouldReconcileDeadPids()) return job;
   if (!job || !isActiveJobStatus(job.status)) return job;
   const pid = Number.isFinite(job.pid) ? job.pid : null;
   if (pid === null) return job;
-  if (isProcessAlive(pid)) return job;
+  if (isProcessAlive(pid, job.pidStartToken)) return job;
 
   try {
-    markDeadPidJobFailed(workspacePath, job.id, pid);
+    markDeadPidJobFailed(workspacePath, job.id, pid, job.pidStartToken);
   } catch {
     // Never let reconciliation errors crash a status read.
     return job;
@@ -170,8 +180,8 @@ export function buildStatusSnapshot(jobs, workspacePath, opts = {}) {
   const reconciled = sorted.map((j) => reconcileIfDead(workspacePath, j));
   const enriched = reconciled.map((j) => enrichJob(j, workspacePath));
 
-  const running = enriched.filter((j) => j.status === "running");
-  const finished = enriched.filter((j) => j.status !== "running");
+  const running = enriched.filter((j) => isActiveJobStatus(j.status));
+  const finished = enriched.filter((j) => !isActiveJobStatus(j.status));
   const latestFinished = finished[0] ?? null;
   const recent = finished.slice(0, 5);
 

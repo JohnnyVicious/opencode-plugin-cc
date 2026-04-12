@@ -8,7 +8,7 @@
 // `/opencode:setup` always report `providers: []`. (Apache License 2.0
 // §4(b) modification notice.)
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -126,20 +126,82 @@ export function spawnDetached(cmd, args, opts = {}) {
 }
 
 /**
- * Check whether a process is still alive. Uses signal 0 which does not
- * affect the process — only probes existence.
+ * Return a stable best-effort process start token for PID-recycling checks.
+ * The token format is intentionally opaque and platform-prefixed.
  * @param {number | null | undefined} pid
+ * @returns {string|null}
+ */
+export function getProcessStartToken(pid) {
+  if (pid == null || !Number.isFinite(pid) || pid <= 0) return null;
+
+  if (process.platform === "linux") {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      const endOfComm = stat.lastIndexOf(")");
+      if (endOfComm !== -1) {
+        const fieldsFromState = stat.slice(endOfComm + 2).trim().split(/\s+/);
+        const startTime = fieldsFromState[19];
+        if (startTime) return `linux:${startTime}`;
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  if (process.platform === "darwin" || process.platform === "freebsd") {
+    const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf8",
+      shell: platformShellOption(),
+      windowsHide: true,
+    });
+    const started = result.status === 0 ? result.stdout.trim() : "";
+    return started ? `${process.platform}:${started}` : null;
+  }
+
+  if (process.platform === "win32") {
+    const result = spawnSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-Command",
+        `(Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}").CreationDate`,
+      ],
+      {
+        encoding: "utf8",
+        windowsHide: true,
+      }
+    );
+    const started = result.status === 0 ? result.stdout.trim() : "";
+    return started ? `win32:${started}` : null;
+  }
+
+  return null;
+}
+
+/**
+ * Check whether a process is still alive. Uses signal 0 which does not
+ * affect the process — only probes existence. When an expected start token
+ * is supplied and the platform can read the current process start token, a
+ * token mismatch is treated as dead to avoid PID-recycling false positives.
+ * @param {number | null | undefined} pid
+ * @param {string | null | undefined} expectedStartToken
  * @returns {boolean}
  */
-export function isProcessAlive(pid) {
+export function isProcessAlive(pid, expectedStartToken = null) {
   if (pid == null || !Number.isFinite(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
-    return true;
   } catch (err) {
-    // ESRCH = dead. EPERM = exists but no permission.
-    return err?.code === "EPERM";
+    // ESRCH = dead. EPERM/EACCES = exists but no permission.
+    if (err?.code !== "EPERM" && err?.code !== "EACCES") return false;
+    return true;
   }
+
+  if (expectedStartToken) {
+    const actualStartToken = getProcessStartToken(pid);
+    if (actualStartToken && actualStartToken !== expectedStartToken) return false;
+  }
+  return true;
 }
 
 // ------------------------------------------------------------------

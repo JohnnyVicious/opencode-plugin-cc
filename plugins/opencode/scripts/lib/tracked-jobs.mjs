@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { ensureDir, appendLine } from "./fs.mjs";
 import { generateJobId, upsertJob, jobLogPath, jobDataPath } from "./state.mjs";
+import { getProcessStartToken } from "./process.mjs";
 
 const SESSION_ID_ENV = "OPENCODE_COMPANION_SESSION_ID";
 
@@ -62,7 +63,12 @@ export function createJobRecord(workspacePath, type, meta = {}) {
  */
 export async function runTrackedJob(workspacePath, job, runner, options = {}) {
   // Mark as running
-  upsertJob(workspacePath, { id: job.id, status: "running", pid: process.pid });
+  upsertJob(workspacePath, {
+    id: job.id,
+    status: "running",
+    pid: process.pid,
+    pidStartToken: getProcessStartToken(process.pid),
+  });
 
   const logFile = jobLogPath(workspacePath, job.id);
   ensureDir(path.dirname(logFile));
@@ -111,6 +117,8 @@ export async function runTrackedJob(workspacePath, job, runner, options = {}) {
     upsertJob(workspacePath, {
       id: job.id,
       status: "completed",
+      pid: null,
+      pidStartToken: null,
       completedAt: new Date().toISOString(),
       result: result?.rendered ?? result?.summary ?? null,
     });
@@ -128,6 +136,8 @@ export async function runTrackedJob(workspacePath, job, runner, options = {}) {
       id: job.id,
       status: "failed",
       phase: "failed",
+      pid: null,
+      pidStartToken: null,
       completedAt: new Date().toISOString(),
       errorMessage: err.message,
     });
