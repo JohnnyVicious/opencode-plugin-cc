@@ -1,7 +1,89 @@
 // Job control: query, sort, enrich, and build status snapshots.
 
 import { tailLines } from "./fs.mjs";
-import { jobLogPath } from "./state.mjs";
+import { jobLogPath, loadState, upsertJob } from "./state.mjs";
+import { isProcessAlive } from "./process.mjs";
+
+function isActiveJobStatus(status) {
+  return status === "queued" || status === "running";
+}
+
+/**
+ * Mark a job as failed because its tracked PID is no longer alive. Re-reads
+ * the latest persisted state before writing to guard against a legitimate
+ * completion racing the probe.
+ *
+ * @param {string} workspacePath
+ * @param {string} jobId
+ * @param {number} pid - the pid we observed as dead
+ * @returns {boolean} true if a write happened
+ */
+export function markDeadPidJobFailed(workspacePath, jobId, pid) {
+  const latest = loadState(workspacePath).jobs?.find((j) => j.id === jobId);
+  if (!latest) return false;
+
+  // Only overwrite active states; never downgrade terminal states.
+  if (!isActiveJobStatus(latest.status)) return false;
+
+  // Only overwrite if the PID still matches what we observed as dead. Guards
+  // against a job that legitimately restarted with a new PID between the
+  // probe and the write.
+  if (latest.pid !== pid) return false;
+
+  upsertJob(workspacePath, {
+    id: jobId,
+    status: "failed",
+    phase: "failed",
+    pid: null,
+    errorMessage: `Tracked process PID ${pid} exited unexpectedly without writing a terminal status.`,
+    completedAt: new Date().toISOString(),
+  });
+  return true;
+}
+
+/**
+ * If a job is still marked active but its tracked PID is dead, reconcile it
+ * to failed and return the updated record. Otherwise return the original.
+ *
+ * Called from every status read path so a single status query is enough to
+ * surface dead workers — no need to wait for SessionEnd.
+ *
+ * @param {string} workspacePath
+ * @param {object} job
+ * @returns {object}
+ */
+export function reconcileIfDead(workspacePath, job) {
+  if (!job || !isActiveJobStatus(job.status)) return job;
+  const pid = Number.isFinite(job.pid) ? job.pid : null;
+  if (pid === null) return job;
+  if (isProcessAlive(pid)) return job;
+
+  try {
+    markDeadPidJobFailed(workspacePath, job.id, pid);
+  } catch {
+    // Never let reconciliation errors crash a status read.
+    return job;
+  }
+
+  const latest = loadState(workspacePath).jobs?.find((j) => j.id === job.id);
+  return latest ?? job;
+}
+
+/**
+ * Reconcile all active jobs in the given list against live PIDs.
+ * Returns a new list where dead-PID jobs have been rewritten to failed.
+ *
+ * Cheap shortcut used by handlers that otherwise operate on pure job arrays
+ * (handleCancel, handleResult) so a single call surfaces dead workers.
+ *
+ * @param {object[]} jobs
+ * @param {string} workspacePath
+ * @returns {object[]}
+ */
+export function reconcileAllJobs(jobs, workspacePath) {
+  if (!Array.isArray(jobs) || jobs.length === 0) return jobs;
+  return jobs.map((j) => reconcileIfDead(workspacePath, j));
+}
 
 /**
  * Sort jobs newest first by updatedAt.
@@ -83,7 +165,10 @@ export function buildStatusSnapshot(jobs, workspacePath, opts = {}) {
   }
 
   const sorted = sortJobsNewestFirst(filtered);
-  const enriched = sorted.map((j) => enrichJob(j, workspacePath));
+  // Reconcile any active jobs whose tracked PID is dead before enriching, so
+  // a single status read surfaces stuck workers immediately.
+  const reconciled = sorted.map((j) => reconcileIfDead(workspacePath, j));
+  const enriched = reconciled.map((j) => enrichJob(j, workspacePath));
 
   const running = enriched.filter((j) => j.status === "running");
   const finished = enriched.filter((j) => j.status !== "running");

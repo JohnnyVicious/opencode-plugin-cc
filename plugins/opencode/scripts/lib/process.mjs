@@ -90,6 +90,23 @@ export function spawnDetached(cmd, args, opts = {}) {
   return child;
 }
 
+/**
+ * Check whether a process is still alive. Uses signal 0 which does not
+ * affect the process — only probes existence.
+ * @param {number | null | undefined} pid
+ * @returns {boolean}
+ */
+export function isProcessAlive(pid) {
+  if (pid == null || !Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // ESRCH = dead. EPERM = exists but no permission.
+    return err?.code === "EPERM";
+  }
+}
+
 // ------------------------------------------------------------------
 // OpenCode auth.json discovery
 // ------------------------------------------------------------------

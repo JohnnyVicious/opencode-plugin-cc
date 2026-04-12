@@ -44,7 +44,7 @@ import { isOpencodeInstalled, getOpencodeVersion, spawnDetached, getConfiguredPr
 import { isServerRunning, ensureServer, createClient, connect } from "./lib/opencode-server.mjs";
 import { resolveWorkspace } from "./lib/workspace.mjs";
 import { loadState, updateState, upsertJob, generateJobId, jobDataPath } from "./lib/state.mjs";
-import { buildStatusSnapshot, resolveResultJob, resolveCancelableJob, enrichJob } from "./lib/job-control.mjs";
+import { buildStatusSnapshot, resolveResultJob, resolveCancelableJob, enrichJob, reconcileAllJobs } from "./lib/job-control.mjs";
 import { createJobRecord, runTrackedJob, getClaudeSessionId } from "./lib/tracked-jobs.mjs";
 import {
   renderStatus,
@@ -521,8 +521,9 @@ async function handleResult(argv) {
 
   const workspace = await resolveWorkspace();
   const state = loadState(workspace);
+  const reconciled = reconcileAllJobs(state.jobs ?? [], workspace);
 
-  const { job, ambiguous } = resolveResultJob(state.jobs ?? [], ref);
+  const { job, ambiguous } = resolveResultJob(reconciled, ref);
 
   if (ambiguous) {
     console.error("Ambiguous job reference. Please provide a more specific ID prefix.");
@@ -550,9 +551,10 @@ async function handleCancel(argv) {
   const workspace = await resolveWorkspace();
   const state = loadState(workspace);
   const sessionId = getClaudeSessionId();
+  const reconciled = reconcileAllJobs(state.jobs ?? [], workspace);
 
   const { job, ambiguous, sessionScoped } = resolveCancelableJob(
-    state.jobs ?? [],
+    reconciled,
     ref,
     { sessionId }
   );
