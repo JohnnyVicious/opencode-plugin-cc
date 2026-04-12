@@ -46,7 +46,14 @@ import { isOpencodeInstalled, getOpencodeVersion, spawnDetached, getConfiguredPr
 import { isServerRunning, ensureServer, createClient, connect } from "./lib/opencode-server.mjs";
 import { resolveWorkspace } from "./lib/workspace.mjs";
 import { loadState, updateState, upsertJob, generateJobId, jobDataPath } from "./lib/state.mjs";
-import { buildStatusSnapshot, resolveResultJob, resolveCancelableJob, enrichJob, reconcileAllJobs } from "./lib/job-control.mjs";
+import {
+  buildStatusSnapshot,
+  resolveResultJob,
+  resolveCancelableJob,
+  enrichJob,
+  reconcileAllJobs,
+  matchJobReference,
+} from "./lib/job-control.mjs";
 import { createJobRecord, runTrackedJob, getClaudeSessionId } from "./lib/tracked-jobs.mjs";
 import {
   renderStatus,
@@ -589,7 +596,11 @@ async function handleWorktreeCleanup(argv) {
 
   const workspace = await resolveWorkspace();
   const state = loadState(workspace);
-  const job = state.jobs?.find((j) => j.id === jobId || j.id.startsWith(jobId));
+  const { job, ambiguous } = matchJobReference(state.jobs ?? [], jobId);
+  if (ambiguous) {
+    console.error("Ambiguous job reference. Please provide a more specific ID prefix.");
+    process.exit(1);
+  }
   if (!job) {
     console.error(`No job found for ${jobId}.`);
     process.exit(1);
@@ -631,7 +642,7 @@ async function handleWorktreeCleanup(argv) {
 async function handleTaskWorker(argv) {
   const { options } = parseArgs(argv, {
     valueOptions: ["job-id", "workspace", "task-text", "agent", "model", "resume-session"],
-    booleanOptions: ["write"],
+    booleanOptions: ["write", "worktree"],
   });
 
   const workspace = options.workspace;
@@ -639,16 +650,45 @@ async function handleTaskWorker(argv) {
   const taskText = options["task-text"];
   const agentName = options.agent ?? "build";
   const isWrite = !!options.write;
+  const useWorktree = Boolean(options.worktree);
   const resumeSessionId = options["resume-session"];
 
   if (!workspace || !jobId || !taskText) {
     process.exit(1);
   }
 
+  let worktreeSession = null;
+  let effectiveCwd = workspace;
+  if (useWorktree) {
+    try {
+      worktreeSession = await createWorktreeSession(workspace);
+      effectiveCwd = worktreeSession.worktreePath;
+      upsertJob(workspace, {
+        id: jobId,
+        worktreeSession: {
+          worktreePath: worktreeSession.worktreePath,
+          branch: worktreeSession.branch,
+          repoRoot: worktreeSession.repoRoot,
+          baseCommit: worktreeSession.baseCommit,
+          timestamp: worktreeSession.timestamp,
+        },
+      });
+    } catch (err) {
+      upsertJob(workspace, {
+        id: jobId,
+        status: "failed",
+        phase: "failed",
+        completedAt: new Date().toISOString(),
+        errorMessage: `Failed to create worktree: ${err.message}`,
+      });
+      process.exit(1);
+    }
+  }
+
   try {
     await runTrackedJob(workspace, { id: jobId }, async ({ report, log }) => {
       report("starting", "Background worker connecting to OpenCode...");
-      const client = await connect({ cwd: workspace });
+      const client = await connect({ cwd: effectiveCwd });
 
       let sessionId;
       if (resumeSessionId) {
@@ -663,17 +703,48 @@ async function handleTaskWorker(argv) {
 
       const prompt = buildTaskPrompt(taskText, { write: isWrite });
       report("investigating", "Running task...");
+      log(`Agent: ${agentName}, Write: ${isWrite}, Worktree: ${worktreeSession?.branch ?? "no"}`);
 
       const response = await client.sendPrompt(sessionId, prompt, {
         agent: agentName,
       });
 
       const text = extractResponseText(response);
+
+      let worktreeDiff = null;
+      if (worktreeSession) {
+        try {
+          worktreeDiff = await diffWorktreeSession(worktreeSession);
+        } catch (err) {
+          log(`Failed to compute worktree diff: ${err.message}`);
+        }
+      }
+
       report("finalizing", "Done");
 
-      return { rendered: text, summary: text.slice(0, 500) };
+      return {
+        rendered: worktreeSession
+          ? renderWorktreeTaskOutput(text, worktreeSession, worktreeDiff, jobId)
+          : text,
+        summary: text.slice(0, 500),
+        worktreeSession: worktreeSession
+          ? {
+              worktreePath: worktreeSession.worktreePath,
+              branch: worktreeSession.branch,
+              repoRoot: worktreeSession.repoRoot,
+              baseCommit: worktreeSession.baseCommit,
+            }
+          : null,
+      };
     });
   } catch (err) {
+    if (worktreeSession) {
+      try {
+        await cleanupWorktreeSession(worktreeSession, { keep: false });
+      } catch {
+        // best-effort
+      }
+    }
     // Error is already logged by runTrackedJob
     process.exit(1);
   }

@@ -16,17 +16,24 @@ import {
   getPrDiff,
 } from "./git.mjs";
 
-// Inline-diff thresholds. When a review exceeds either, we fall back to a
-// "self-collect" context that omits the full diff and asks OpenCode to
-// inspect the change itself via read-only git commands. See issue #40 and
-// openai/codex-plugin-cc#179.
+// Inline-diff thresholds. When a review exceeds either, we keep the prompt
+// bounded by including a diff excerpt instead of the full diff. The review
+// agent is intentionally shell-disabled, so the prompt must contain the
+// evidence the model is allowed to use.
 const DEFAULT_INLINE_DIFF_MAX_FILES = 5;
 const DEFAULT_INLINE_DIFF_MAX_BYTES = 256 * 1024;
 
-function buildCollectionGuidance(includeDiff) {
-  return includeDiff
+function buildCollectionGuidance(diffIsComplete) {
+  return diffIsComplete
     ? "Use the repository context below as primary evidence."
-    : "The repository context below is a lightweight summary. The full diff is intentionally omitted — inspect the target yourself with read-only git commands (git diff, git log, git show) before finalizing findings.";
+    : "The repository context below contains a bounded diff excerpt, not the complete diff. Only report findings supported by the provided excerpt, metadata, status, and changed-file list; explicitly say when omitted diff content prevents a conclusion.";
+}
+
+function truncateUtf8(text, maxBytes) {
+  if (!text) return text;
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= maxBytes) return text;
+  return buf.subarray(0, maxBytes).toString("utf8").replace(/\uFFFD$/, "");
 }
 
 /**
@@ -57,10 +64,6 @@ export async function buildReviewPrompt(cwd, opts, pluginRoot) {
     diffStat = await getDiffStat(cwd, { base: opts.base });
   }
 
-  // Classify the review scope. Large reviews fall back to a lightweight
-  // context (stat + changed-files list + status) so the prompt doesn't blow
-  // past model/provider input limits. OpenCode is then instructed to
-  // inspect the diff itself via read-only git commands.
   const diffBytes = Buffer.byteLength(diff || "", "utf8");
   const maxFiles = Number.isFinite(opts.maxInlineDiffFiles)
     ? opts.maxInlineDiffFiles
@@ -68,8 +71,11 @@ export async function buildReviewPrompt(cwd, opts, pluginRoot) {
   const maxBytes = Number.isFinite(opts.maxInlineDiffBytes)
     ? opts.maxInlineDiffBytes
     : DEFAULT_INLINE_DIFF_MAX_BYTES;
-  const includeDiff = changedFiles.length <= maxFiles && diffBytes <= maxBytes;
-  const collectionGuidance = buildCollectionGuidance(includeDiff);
+  const overFileLimit = changedFiles.length > maxFiles;
+  const overByteLimit = diffBytes > maxBytes;
+  const diffIsComplete = !overByteLimit;
+  const diffForPrompt = overByteLimit ? truncateUtf8(diff, maxBytes) : diff;
+  const collectionGuidance = buildCollectionGuidance(diffIsComplete);
 
   const targetLabel = prInfo
     ? `Pull request #${prInfo.number} "${prInfo.title}" (${prInfo.headRefName} -> ${prInfo.baseRefName})`
@@ -77,8 +83,12 @@ export async function buildReviewPrompt(cwd, opts, pluginRoot) {
       ? `Branch diff against ${opts.base}`
       : "Working tree changes";
 
-  const reviewContext = buildReviewContext(diff, status, changedFiles, prInfo, {
-    includeDiff,
+  const reviewContext = buildReviewContext(diffForPrompt, status, changedFiles, prInfo, {
+    diffIsComplete,
+    originalDiffBytes: diffBytes,
+    maxInlineDiffBytes: maxBytes,
+    overFileLimit,
+    overByteLimit,
     diffStat,
   });
 
@@ -112,7 +122,7 @@ function buildStandardReviewPrompt(diff, status, changedFiles, opts) {
 
   const reviewContext =
     opts.reviewContext
-    ?? buildReviewContext(diff, status, changedFiles, opts.prInfo, { includeDiff: true });
+    ?? buildReviewContext(diff, status, changedFiles, opts.prInfo, { diffIsComplete: true });
   const collectionGuidance = opts.collectionGuidance ?? buildCollectionGuidance(true);
 
   return `You are performing a code review of ${targetLabel}.
@@ -136,13 +146,11 @@ ${reviewContext}`;
 /**
  * Build the repository context block for review prompts.
  *
- * When `opts.includeDiff` is false (large-review fallback), the full `<diff>`
- * block is omitted and a `<diff_stat>` summary is emitted instead. OpenCode
- * is expected to inspect the diff itself via read-only git commands — the
- * collection-guidance line above the context makes this explicit.
+ * When `opts.diffIsComplete` is false, the `<diff>` block is a bounded
+ * excerpt. The surrounding note tells the model not to invent findings from
+ * omitted content.
  */
 function buildReviewContext(diff, status, changedFiles, prInfo, opts = {}) {
-  const includeDiff = opts.includeDiff !== false;
   const sections = [];
 
   if (prInfo) {
@@ -166,16 +174,31 @@ function buildReviewContext(diff, status, changedFiles, prInfo, opts = {}) {
     sections.push(`<changed_files>\n${changedFiles.join("\n")}\n</changed_files>`);
   }
 
-  if (includeDiff) {
-    if (diff) {
-      sections.push(`<diff>\n${diff}\n</diff>`);
+  if (opts.overFileLimit || opts.overByteLimit) {
+    const reasons = [];
+    if (opts.overFileLimit) reasons.push(`file count ${changedFiles.length}`);
+    if (opts.overByteLimit) {
+      reasons.push(`diff size ${opts.originalDiffBytes} bytes`);
     }
-  } else {
-    const statBody =
-      opts.diffStat && opts.diffStat.length > 0
-        ? opts.diffStat
-        : `(diff too large to inline: ${changedFiles.length} file(s))`;
-    sections.push(`<diff_stat>\n${statBody}\n</diff_stat>`);
+    const budget = opts.overByteLimit && opts.maxInlineDiffBytes
+      ? `; excerpt budget ${opts.maxInlineDiffBytes} bytes`
+      : "";
+    const note = opts.diffIsComplete === false
+      ? "Diff context is bounded"
+      : "Review spans a broad changed-file set, but the diff below is complete";
+    sections.push(
+      `<diff_note>\n` +
+      `${note} (${reasons.join(", ")}${budget}). ` +
+      `Findings must be supported by the diff evidence below.\n` +
+      `</diff_note>`
+    );
+    if (opts.diffStat) {
+      sections.push(`<diff_stat>\n${opts.diffStat}\n</diff_stat>`);
+    }
+  }
+
+  if (diff) {
+    sections.push(`<diff>\n${diff}\n</diff>`);
   }
 
   return sections.join("\n\n");

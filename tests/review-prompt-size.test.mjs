@@ -50,7 +50,7 @@ describe("buildReviewPrompt large-diff fallback", () => {
     assert.doesNotMatch(prompt, /diff too large to inline/);
   });
 
-  it("falls back to lightweight context when maxInlineDiffBytes is exceeded", async () => {
+  it("includes a bounded diff excerpt when maxInlineDiffBytes is exceeded", async () => {
     fs.writeFileSync(
       path.join(tmpDir, "a.js"),
       `export const a = '${"x".repeat(2048)}';\n`
@@ -67,15 +67,16 @@ describe("buildReviewPrompt large-diff fallback", () => {
       PLUGIN_ROOT
     );
 
-    assert.doesNotMatch(prompt, /<diff>\n/);
+    assert.match(prompt, /<diff_note>/);
+    assert.match(prompt, /<diff>\n/);
     assert.match(prompt, /<diff_stat>/);
-    assert.match(prompt, /lightweight summary/);
-    assert.match(prompt, /read-only git commands/);
+    assert.match(prompt, /bounded diff excerpt/);
+    assert.doesNotMatch(prompt, /read-only git commands/);
     // The x-heavy content should not be inlined.
     assert.doesNotMatch(prompt, /xxxxxxxxxxxxxx/);
   });
 
-  it("falls back when maxInlineDiffFiles is exceeded", async () => {
+  it("marks broad file-count reviews but keeps diff evidence in the prompt", async () => {
     // Modify 3 already-tracked files; cap at 2.
     for (const name of ["b.js", "c.js", "d.js"]) {
       fs.writeFileSync(path.join(tmpDir, name), `export const ${name[0]} = 'modified';\n`);
@@ -92,9 +93,11 @@ describe("buildReviewPrompt large-diff fallback", () => {
       PLUGIN_ROOT
     );
 
-    assert.doesNotMatch(prompt, /<diff>\n/);
-    assert.match(prompt, /<diff_stat>|\(diff too large to inline/);
-    assert.match(prompt, /lightweight summary/);
+    assert.match(prompt, /<diff_note>/);
+    assert.match(prompt, /<diff>\n/);
+    assert.match(prompt, /modified/);
+    assert.match(prompt, /broad changed-file set/);
+    assert.doesNotMatch(prompt, /bounded diff excerpt/);
   });
 
   it("injects collection guidance into adversarial template", async () => {

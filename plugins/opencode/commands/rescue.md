@@ -2,7 +2,7 @@
 description: Delegate investigation, an explicit fix request, or follow-up rescue work to the OpenCode rescue subagent
 argument-hint: "[--background|--wait] [--worktree] [--resume|--fresh] [--model <provider/model>] [--agent <build|plan>] [what OpenCode should investigate, solve, or continue]"
 context: fork
-allowed-tools: Bash(node:*)
+allowed-tools: Bash(node:*), AskUserQuestion
 ---
 
 Route this request to the `opencode:opencode-rescue` subagent.
