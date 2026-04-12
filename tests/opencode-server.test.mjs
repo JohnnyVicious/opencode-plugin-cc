@@ -49,17 +49,40 @@ describeOrSkip("opencode HTTP server (integration)", () => {
     client = createClient(serverInfo.url);
   });
 
-  after(() => {
+  after(async () => {
     // Tear down the server we spawned. `ensureServer` only sets `pid`
     // when it actually started a new process, so this is a no-op when
     // the server was already running (which our `before` rejects, but
     // be defensive).
-    if (serverInfo?.pid && !serverInfo.alreadyRunning) {
+    if (!serverInfo?.pid || serverInfo.alreadyRunning) return;
+
+    // opencode is spawned with `detached: true`, which puts it in its
+    // own process group. SIGTERM the negative pid to take down the
+    // whole group (any children opencode forked included).
+    const pgid = -serverInfo.pid;
+    try {
+      process.kill(pgid, "SIGTERM");
+    } catch {
+      // group may already be gone — that's fine
+    }
+
+    // Wait briefly for graceful shutdown, then SIGKILL the group if
+    // anything is still alive. We poll instead of sleeping a fixed
+    // interval so a fast exit doesn't waste time.
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline) {
       try {
-        process.kill(serverInfo.pid, "SIGTERM");
+        process.kill(pgid, 0); // signal 0 = existence check
       } catch {
-        // already exited
+        return; // group is gone
       }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    try {
+      process.kill(pgid, "SIGKILL");
+    } catch {
+      // already exited between checks
     }
   });
 
