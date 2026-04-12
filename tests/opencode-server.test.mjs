@@ -31,6 +31,30 @@ const TEST_PORT = Number(process.env.OPENCODE_TEST_PORT ?? 14096);
 const opencodeAvailable = await isOpencodeInstalled();
 const describeOrSkip = opencodeAvailable ? describe : describe.skip;
 
+it("ensureServer reports opencode spawn failure without crashing", async (t) => {
+  const port = Number(process.env.OPENCODE_MISSING_BINARY_TEST_PORT ?? 24096);
+  if (await isServerRunning(TEST_HOST, port)) {
+    t.skip(`test port ${port} is already in use`);
+    return;
+  }
+
+  const oldPath = process.env.PATH;
+  const oldPathUpper = process.env.Path;
+  process.env.PATH = "";
+  if (oldPathUpper !== undefined) process.env.Path = "";
+  try {
+    await assert.rejects(
+      () => ensureServer({ host: TEST_HOST, port }),
+      /Failed to start OpenCode server|exited before becoming ready/
+    );
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
+    if (oldPathUpper === undefined) delete process.env.Path;
+    else process.env.Path = oldPathUpper;
+  }
+});
+
 describeOrSkip("opencode HTTP server (integration)", () => {
   let serverInfo;
   let client;

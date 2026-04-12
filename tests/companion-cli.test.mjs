@@ -101,6 +101,24 @@ describe("opencode-companion CLI", () => {
     assert.equal(loadState(workspace).config.reviewGateMaxPerSession, undefined);
   });
 
+  it("foreground worktree setup failure marks the created job failed", async () => {
+    const result = await runNodeScript([
+      companionScript,
+      "task",
+      "--write",
+      "--worktree",
+      "change something",
+    ]);
+
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /Failed to create worktree/);
+    const state = loadState(workspace);
+    assert.equal(state.jobs.length, 1);
+    assert.equal(state.jobs[0].status, "failed");
+    assert.equal(state.jobs[0].phase, "failed");
+    assert.match(state.jobs[0].errorMessage, /Failed to create worktree/);
+  });
+
   it("safe-command forwards setup multi-token args from stdin", async () => {
     const result = await runNodeScript(
       [safeCommandScript, "setup"],

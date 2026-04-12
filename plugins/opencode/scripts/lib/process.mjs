@@ -45,13 +45,19 @@ export async function resolveOpencodeBinary() {
       windowsHide: true,
     });
     let out = "";
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
     proc.stdout.on("data", (d) => (out += d));
-    proc.on("error", () => resolve(null));
+    proc.on("error", () => finish(null));
     proc.on("close", (code) => {
-      if (code !== 0) return resolve(null);
+      if (code !== 0) return finish(null);
       // `where` returns all matches separated by CRLF; pick the first.
       const first = out.trim().split(/\r?\n/)[0] ?? "";
-      resolve(first || null);
+      finish(first || null);
     });
   });
 }
@@ -77,8 +83,15 @@ export async function getOpencodeVersion() {
       windowsHide: true,
     });
     let out = "";
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
     proc.stdout.on("data", (d) => (out += d));
-    proc.on("close", (code) => resolve(code === 0 ? out.trim() : null));
+    proc.on("error", () => finish(null));
+    proc.on("close", (code) => finish(code === 0 ? out.trim() : null));
   });
 }
 
@@ -113,6 +126,12 @@ export function runCommand(cmd, args, opts = {}) {
     let stdoutBytes = 0;
     let stderr = "";
     let overflowed = false;
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
 
     proc.stdout.on("data", (chunk) => {
       if (overflowed) return;
@@ -133,8 +152,16 @@ export function runCommand(cmd, args, opts = {}) {
       stdout += buf.toString("utf8");
     });
     proc.stderr.on("data", (d) => (stderr += d));
+    proc.on("error", (err) =>
+      finish({
+        stdout,
+        stderr: stderr || err.message,
+        exitCode: typeof err.errno === "number" ? err.errno : 1,
+        overflowed,
+      })
+    );
     proc.on("close", (exitCode) =>
-      resolve({
+      finish({
         stdout,
         stderr,
         // When we killed the child for overflow the exit code is not
@@ -163,6 +190,7 @@ export function spawnDetached(cmd, args, opts = {}) {
     shell: platformShellOption(),
     windowsHide: true,
   });
+  child.on("error", () => {});
   child.unref();
   return child;
 }

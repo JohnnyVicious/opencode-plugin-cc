@@ -81,7 +81,7 @@ import {
   diffWorktreeSession,
   cleanupWorktreeSession,
 } from "./lib/worktree.mjs";
-import { readJson } from "./lib/fs.mjs";
+import { readJson, readDenyRules } from "./lib/fs.mjs";
 import { resolveReviewAgent } from "./lib/review-agent.mjs";
 import { parseModelString, selectFreeModel } from "./lib/model.mjs";
 
@@ -465,6 +465,23 @@ async function handleTask(argv) {
     process.exit(1);
   }
 
+  // Issue #33 — warn when deny rules exist and task is write-capable.
+  // OpenCode runs outside Claude Code's permission system, so it may be able
+  // to edit files that Claude Code itself would block. Surfacing this helps
+  // users make an informed choice without blocking legitimate rescue work.
+  if (isWrite) {
+    const denyRules = readDenyRules(workspace);
+    if (denyRules.length > 0) {
+      process.stderr.write(
+        `[opencode-companion] Warning: this workspace has Claude Code deny rules (.claude/settings.json).\n` +
+          `  OpenCode runs with its own permission boundary and may be able to read/edit files\n` +
+          `  that Claude Code would block. Review the deny rules before proceeding:\n` +
+          denyRules.map((r) => `    - path: ${r.path} ${r.read ? "[read blocked]" : ""} ${r.edit ? "[edit blocked]" : ""}`).join("\n") +
+          `\n`
+      );
+    }
+  }
+
   // Check for resume
   let resumeSessionId = null;
   if (options["resume-last"]) {
@@ -535,6 +552,13 @@ async function handleTask(argv) {
         },
       });
     } catch (err) {
+      upsertJob(workspace, {
+        id: job.id,
+        status: "failed",
+        phase: "failed",
+        completedAt: new Date().toISOString(),
+        errorMessage: `Failed to create worktree: ${err.message}`,
+      });
       console.error(`Failed to create worktree: ${err.message}`);
       process.exit(1);
     }

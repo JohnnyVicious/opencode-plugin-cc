@@ -22,7 +22,8 @@ they already have.
 
 - `/opencode:review` for a normal read-only OpenCode review
 - `/opencode:adversarial-review` for a steerable challenge review
-- `/opencode:rescue`, `/opencode:status`, `/opencode:result`, and `/opencode:cancel` to delegate work and manage background jobs
+- `/opencode:rescue`, `/opencode:status`, `/opencode:result`, and `/opencode:cancel` to delegate work and manage active jobs
+- Optional rescue worktrees so OpenCode can make writable changes in an isolated git worktree before you keep or discard them
 
 ## Requirements
 
@@ -96,17 +97,51 @@ To check your configured providers:
 
 ## Slash Commands
 
-- `/opencode:review` -- Normal OpenCode code review (read-only). Supports `--base <ref>`, `--wait`, `--background`.
-- `/opencode:adversarial-review` -- Steerable review that challenges implementation and design decisions. Accepts custom focus text.
-- `/opencode:rescue` -- Delegates a task to OpenCode via the `opencode:opencode-rescue` subagent. Supports `--model`, `--agent`, `--resume`, `--fresh`, `--background`.
+- `/opencode:review` -- Normal OpenCode code review (read-only). Supports `--base <ref>`, `--pr <number>`, `--model <provider/model>`, `--free`, `--wait`, and `--background`.
+- `/opencode:adversarial-review` -- Steerable review that challenges implementation and design decisions. Supports `--base <ref>`, `--pr <number>`, `--model <provider/model>`, `--free`, `--wait`, `--background`, and custom focus text.
+- `/opencode:rescue` -- Delegates a task to OpenCode via the `opencode:opencode-rescue` subagent. Supports `--model`, `--free`, `--agent`, `--resume`, `--fresh`, `--worktree`, `--wait`, and `--background`.
 - `/opencode:status` -- Shows running/recent OpenCode jobs for the current repo.
 - `/opencode:result` -- Shows final output for a finished job, including OpenCode session ID for resuming.
-- `/opencode:cancel` -- Cancels an active background OpenCode job.
-- `/opencode:setup` -- Checks OpenCode install/auth, can enable/disable the review gate hook.
+- `/opencode:cancel` -- Cancels an active OpenCode job.
+- `/opencode:setup` -- Checks OpenCode install/auth, can enable/disable the review gate hook, and can configure review-gate throttles.
 
 ## Review Gate
 
-When enabled via `/opencode:setup --enable-review-gate`, a Stop hook runs a targeted OpenCode review on Claude's response. If issues are found, the stop is blocked so Claude can address them first. Warning: can create long-running loops and drain usage limits.
+When enabled via `/opencode:setup --enable-review-gate`, a Stop hook runs a targeted OpenCode review on Claude's response. If issues are found, the stop is blocked so Claude can address them first. Warning: without limits this can create long-running loops and drain usage.
+
+Throttle controls:
+
+```
+/opencode:setup --review-gate-max 5
+/opencode:setup --review-gate-cooldown 10
+/opencode:setup --review-gate-max off
+/opencode:setup --review-gate-cooldown off
+```
+
+- `--review-gate-max <n|off>` limits how many stop-time reviews can run in one Claude session.
+- `--review-gate-cooldown <minutes|off>` enforces a minimum delay between stop-time reviews in the same Claude session.
+
+## Rescue Worktrees
+
+Use `/opencode:rescue --worktree ...` for write-capable tasks you want isolated from the current working tree. OpenCode runs in a disposable `.worktrees/opencode-*` git worktree on an `opencode/*` branch. When the task completes, the output includes keep/discard commands:
+
+- `keep` applies the worktree diff back to the main working tree as staged changes, then removes the temporary worktree and branch.
+- `discard` removes the temporary worktree and branch without applying changes.
+
+If applying the patch fails, the worktree is preserved for manual recovery.
+
+## Review-to-Rescue
+
+After a successful `/opencode:review` or `/opencode:adversarial-review`, the rendered review is saved for the current repository. If you run `/opencode:rescue` with no task text, Claude can offer to pass the last review findings back to OpenCode as the rescue task.
+
+## Permission Boundary
+
+OpenCode runs as an independent process with its own permission system, separate from Claude Code's `.claude/settings.json` deny rules. This means:
+
+- A file that Claude Code cannot read or edit (due to a deny rule) **may still be accessible to OpenCode**.
+- `/opencode:rescue` is write-capable by default and has full read/write access to the workspace.
+
+If your workspace uses deny rules, the companion will emit a warning when you start a write-capable task so you can make an informed choice. For fully isolated write operations, use `/opencode:rescue --worktree` which runs in a disposable git worktree.
 
 ## Troubleshooting
 
@@ -164,6 +199,7 @@ opencode-plugin-cc/
 │   ├── schemas/                          # Output schemas
 │   ├── scripts/                          # Node.js runtime
 │   │   ├── opencode-companion.mjs        # CLI entry point
+│   │   ├── safe-command.mjs              # Safe slash-command argument bridge
 │   │   ├── session-lifecycle-hook.mjs
 │   │   ├── stop-review-gate-hook.mjs
 │   │   └── lib/                          # Core modules
@@ -171,13 +207,16 @@ opencode-plugin-cc/
 │   │       ├── state.mjs                 # Persistent state
 │   │       ├── job-control.mjs           # Job management
 │   │       ├── tracked-jobs.mjs          # Job lifecycle tracking
-│   │       ├── render.mjs               # Output rendering
-│   │       ├── prompts.mjs              # Prompt construction
-│   │       ├── git.mjs                  # Git utilities
-│   │       ├── process.mjs             # Process utilities
-│   │       ├── args.mjs                # Argument parsing
-│   │       ├── fs.mjs                  # Filesystem utilities
-│   │       └── workspace.mjs           # Workspace detection
+│   │       ├── worktree.mjs              # Disposable worktree sessions
+│   │       ├── render.mjs                # Output rendering
+│   │       ├── prompts.mjs               # Prompt construction
+│   │       ├── git.mjs                   # Git utilities
+│   │       ├── process.mjs               # Process utilities
+│   │       ├── model.mjs                 # Model selection helpers
+│   │       ├── review-agent.mjs          # Review agent resolution
+│   │       ├── args.mjs                  # Argument parsing
+│   │       ├── fs.mjs                    # Filesystem utilities
+│   │       └── workspace.mjs             # Workspace detection
 │   └── skills/                          # Internal skills
 ├── tests/                               # Test suite
 ├── LICENSE                              # Apache License 2.0

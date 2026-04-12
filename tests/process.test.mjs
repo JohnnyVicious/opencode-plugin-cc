@@ -5,6 +5,7 @@ import path from "node:path";
 import { createTmpDir, cleanupTmpDir } from "./helpers.mjs";
 import {
   runCommand,
+  getOpencodeVersion,
   findOpencodeAuthFile,
   getConfiguredProviders,
 } from "../plugins/opencode/scripts/lib/process.mjs";
@@ -47,6 +48,29 @@ describe("process", () => {
     );
     assert.equal(overflowed, false);
     assert.equal(stdout, "hello");
+  });
+
+  it("runCommand returns a failed result when spawn emits error", async () => {
+    const result = await runCommand("__opencode_missing_command_for_test__", []);
+    assert.notEqual(result.exitCode, 0);
+    assert.equal(result.stdout, "");
+    assert.equal(result.overflowed, false);
+    assert.match(result.stderr, /__opencode_missing_command_for_test__|not found|recognized/i);
+  });
+
+  it("getOpencodeVersion returns null when opencode cannot spawn", async () => {
+    const oldPath = process.env.PATH;
+    const oldPathUpper = process.env.Path;
+    process.env.PATH = "";
+    if (oldPathUpper !== undefined) process.env.Path = "";
+    try {
+      assert.equal(await getOpencodeVersion(), null);
+    } finally {
+      if (oldPath === undefined) delete process.env.PATH;
+      else process.env.PATH = oldPath;
+      if (oldPathUpper === undefined) delete process.env.Path;
+      else process.env.Path = oldPathUpper;
+    }
   });
 });
 

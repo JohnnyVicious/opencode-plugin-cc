@@ -19,6 +19,8 @@
 //     OpenCode to return plans instead of reviews.
 // (Apache License 2.0 §4(b) modification notice — see NOTICE.)
 
+import crypto from "node:crypto";
+import os from "node:os";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -27,6 +29,42 @@ import { platformShellOption } from "./process.mjs";
 const DEFAULT_PORT = 4096;
 const DEFAULT_HOST = "127.0.0.1";
 const SERVER_START_TIMEOUT = 30_000;
+const SERVER_REAP_IDLE_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+
+function serverStatePath(workspacePath) {
+  const key = typeof workspacePath === "string" && workspacePath.length > 0 ? workspacePath : process.cwd();
+  const hash = crypto.createHash("sha256").update(key).digest("hex").slice(0, 16);
+  const pluginDataDir = process.env.CLAUDE_PLUGIN_DATA || path.join(os.tmpdir(), "opencode-companion");
+  return path.join(pluginDataDir, "state", hash, "server.json");
+}
+
+function loadServerState(workspacePath) {
+  try {
+    const p = serverStatePath(workspacePath);
+    return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveServerState(workspacePath, data) {
+  try {
+    const p = serverStatePath(workspacePath);
+    fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(p, JSON.stringify(data, null, 2), "utf8");
+  } catch {
+    // best-effort
+  }
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Resolve the bundled opencode config directory shipped inside the plugin.
@@ -75,6 +113,16 @@ export async function ensureServer(opts = {}) {
   const url = `http://${host}:${port}`;
 
   if (await isServerRunning(host, port)) {
+    // A server is already on the port. Only clear tracked state if the
+    // tracked pid is dead (stale from a prior run) — otherwise it may be
+    // a plugin-owned server from a previous session that reapServerIfOurs
+    // should still be able to identify on SessionEnd.
+    const state = loadServerState(opts.cwd);
+    if (state.lastServerPid && !isProcessAlive(state.lastServerPid)) {
+      delete state.lastServerPid;
+      delete state.lastServerStartedAt;
+      saveServerState(opts.cwd, state);
+    }
     return { url, alreadyRunning: true };
   }
 
@@ -104,15 +152,38 @@ export async function ensureServer(opts = {}) {
     shell: platformShellOption(),
     windowsHide: true,
   });
+  let spawnError = null;
+  let earlyExit = null;
+  proc.once("error", (err) => {
+    spawnError = err;
+  });
+  proc.once("exit", (code, signal) => {
+    earlyExit = { code, signal };
+  });
   proc.unref();
 
-  // Wait for the server to become ready
+  // Wait for the server to become ready. Poll every 250ms rather than
+  // spinning hot — a tight loop would hammer fetch() and burn CPU for up
+  // to SERVER_START_TIMEOUT.
   const deadline = Date.now() + SERVER_START_TIMEOUT;
   while (Date.now() < deadline) {
-    if (await isServerRunning(host, port)) {
-      return { url, pid: proc.pid, alreadyRunning: false };
+    if (spawnError) {
+      throw new Error(`Failed to start OpenCode server: ${spawnError.message}`);
     }
-    await new Promise((r) => setTimeout(r, 500));
+    if (earlyExit) {
+      const detail = earlyExit.signal
+        ? `signal ${earlyExit.signal}`
+        : `exit code ${earlyExit.code ?? "unknown"}`;
+      throw new Error(`OpenCode server process exited before becoming ready (${detail}).`);
+    }
+    if (await isServerRunning(host, port)) {
+      const state = loadServerState(opts.cwd);
+      state.lastServerPid = proc.pid;
+      state.lastServerStartedAt = Date.now();
+      saveServerState(opts.cwd, state);
+      return { url, alreadyRunning: false, pid: proc.pid };
+    }
+    await new Promise((r) => setTimeout(r, 250));
   }
 
   throw new Error(`OpenCode server failed to start within ${SERVER_START_TIMEOUT / 1000}s`);
@@ -254,4 +325,57 @@ export async function connect(opts = {}) {
   const { url, alreadyRunning } = await ensureServer(opts);
   const client = createClient(url, { directory: opts.cwd });
   return { ...client, serverInfo: { url, alreadyRunning } };
+}
+
+/**
+ * Reap the plugin-spawned OpenCode server on SessionEnd.
+ *
+ * Only kills what we started (tracked via server.json `lastServerPid`).
+ * Guards against killing a server the user started independently by
+ * re-checking isServerRunning after the kill attempt — if something
+ * else owns the port, leave it alone.
+ *
+ * Defense-in-depth: if the server has been running longer than
+ * SERVER_REAP_IDLE_TIMEOUT (5 min) without a successful health check
+ * from a plugin client, it is also considered orphanable even if the
+ * PID is still alive (user may have killed the Claude session while the
+ * server sat idle).
+ *
+ * @param {string} workspacePath
+ * @param {{ port?: number, host?: string }} [opts]
+ * @returns {Promise<boolean>} true if a server was reaped
+ */
+export async function reapServerIfOurs(workspacePath, opts = {}) {
+  const host = opts.host ?? DEFAULT_HOST;
+  const port = opts.port ?? DEFAULT_PORT;
+
+  const state = loadServerState(workspacePath);
+  if (!state.lastServerPid || !Number.isFinite(state.lastServerPid)) return false;
+
+  const pid = state.lastServerPid;
+  const startedAt = state.lastServerStartedAt;
+
+  if (!isProcessAlive(pid)) {
+    saveServerState(workspacePath, { lastServerPid: null, lastServerStartedAt: null });
+    return false;
+  }
+
+  const idleMs = startedAt ? Date.now() - startedAt : Infinity;
+  if (idleMs < SERVER_REAP_IDLE_TIMEOUT) return false;
+
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    // best-effort — PID may have just exited
+  }
+
+  await new Promise((r) => setTimeout(r, 1000));
+
+  const stillRunning = await isServerRunning(host, port);
+  if (!stillRunning) {
+    saveServerState(workspacePath, { lastServerPid: null, lastServerStartedAt: null });
+    return true;
+  }
+
+  return false;
 }
