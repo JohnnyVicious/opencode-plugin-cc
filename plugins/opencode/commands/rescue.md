@@ -46,4 +46,23 @@ Operating rules:
 - Leave the model unset unless the user explicitly asks for one.
 - Leave `--resume` and `--fresh` in the forwarded request. The subagent handles that routing when it builds the `task` command.
 - If the helper reports that OpenCode is missing or unauthenticated, stop and tell the user to run `/opencode:setup`.
-- If the user did not supply a request, ask what OpenCode should investigate or fix.
+- If the user did not supply a request, check for a saved review from `/opencode:review` or `/opencode:adversarial-review`:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" last-review
+```
+
+  - If stdout is `LAST_REVIEW_AVAILABLE`, use `AskUserQuestion` exactly once with two options:
+    - `Fix issues from last review (Recommended)` — prepend the saved review content as context for the rescue task
+    - `Describe a new task` — ask what OpenCode should investigate or fix
+  - If the user chooses to fix from last review, read the saved review via:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" last-review --content
+```
+
+    and include its stdout verbatim in the forwarded task text, prefixed with:
+
+    `The following issues were found in a prior OpenCode review. Please fix them:\n\n`
+
+  - If stdout is `NO_LAST_REVIEW`, ask what OpenCode should investigate or fix.

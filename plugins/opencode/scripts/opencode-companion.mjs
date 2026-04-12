@@ -35,6 +35,8 @@
 //     wired the argument through but never adapted the shape.
 // (Apache License 2.0 §4(b) modification notice.)
 
+import crypto from "node:crypto";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import fs from "node:fs";
@@ -75,6 +77,7 @@ const handlers = {
   task: handleTask,
   "task-worker": handleTaskWorker,
   "task-resume-candidate": handleTaskResumeCandidate,
+  "last-review": handleLastReview,
   status: handleStatus,
   result: handleResult,
   cancel: handleCancel,
@@ -214,6 +217,7 @@ async function handleReview(argv) {
       };
     });
 
+    saveLastReview(workspace, result.rendered);
     console.log(result.rendered);
   } catch (err) {
     console.error(`Review failed: ${err.message}`);
@@ -297,6 +301,7 @@ async function handleAdversarialReview(argv) {
       };
     });
 
+    saveLastReview(workspace, result.rendered);
     console.log(result.rendered);
   } catch (err) {
     console.error(`Adversarial review failed: ${err.message}`);
@@ -600,6 +605,69 @@ async function handleCancel(argv) {
   });
 
   console.log(`Canceled job: ${job.id}`);
+}
+
+// ------------------------------------------------------------------
+// Last-review persistence
+// ------------------------------------------------------------------
+
+/**
+ * Per-repo path where the most recent successful review is saved so the
+ * rescue command can pick it up without the user copy-pasting findings.
+ * @param {string} workspace
+ * @returns {{ dir: string, file: string }}
+ */
+function lastReviewPath(workspace) {
+  const hash = crypto.createHash("sha256").update(workspace).digest("hex").slice(0, 16);
+  const dir = path.join(os.homedir(), ".opencode-companion");
+  return { dir, file: path.join(dir, `last-review-${hash}.md`) };
+}
+
+/**
+ * Best-effort persistence of a rendered review so the rescue flow can read
+ * it later. Never throws — a failed write must not fail the review itself.
+ * @param {string} workspace
+ * @param {string} rendered
+ */
+function saveLastReview(workspace, rendered) {
+  if (!rendered) return;
+  try {
+    const { dir, file } = lastReviewPath(workspace);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(file, rendered, "utf8");
+  } catch {
+    // best-effort
+  }
+}
+
+async function handleLastReview(argv) {
+  const { options } = parseArgs(argv, { booleanOptions: ["json", "content"] });
+  const workspace = await resolveWorkspace();
+  const { file } = lastReviewPath(workspace);
+
+  if (!fs.existsSync(file)) {
+    if (options.json) console.log(JSON.stringify({ available: false }));
+    else console.log("NO_LAST_REVIEW");
+    return;
+  }
+
+  if (options.content) {
+    process.stdout.write(fs.readFileSync(file, "utf8"));
+    return;
+  }
+
+  if (options.json) {
+    const stat = fs.statSync(file);
+    console.log(
+      JSON.stringify({
+        available: true,
+        updatedAt: stat.mtime.toISOString(),
+        path: file,
+      })
+    );
+  } else {
+    console.log("LAST_REVIEW_AVAILABLE");
+  }
 }
 
 // ------------------------------------------------------------------
