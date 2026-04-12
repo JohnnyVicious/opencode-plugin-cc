@@ -38,6 +38,9 @@ jobs:
       - name: Install OpenCode CLI
         run: npm install -g opencode-ai
 
+      - name: Check version metadata is in sync
+        run: npm run check-version
+
       - name: Syntax-check companion scripts
         run: |
           node --check plugins/opencode/scripts/opencode-companion.mjs
@@ -45,6 +48,7 @@ jobs:
           node --check plugins/opencode/scripts/lib/prompts.mjs
           node --check plugins/opencode/scripts/lib/process.mjs
           node --check plugins/opencode/scripts/lib/opencode-server.mjs
+          node --check scripts/bump-version.mjs
 
       - name: Run tests
         run: npm test

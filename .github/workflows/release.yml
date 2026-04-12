@@ -1,0 +1,96 @@
+name: Release
+
+# Manually-triggered release workflow.
+# Runs `npm run bump-version <version>` to update every manifest, commits
+# the bump on `main`, tags it, pushes, and creates a GitHub release with
+# auto-generated notes assembled from PRs since the previous tag.
+#
+# Usage: GitHub web UI → Actions → "Release" → "Run workflow" → enter the
+# new semver (e.g. `1.0.1`).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "New semver (e.g. 1.0.1) — must be greater than the current package.json version"
+        required: true
+        type: string
+
+permissions:
+  contents: write   # commit + tag + release
+
+jobs:
+  release:
+    name: Bump, tag, and release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Need full history so `gh release create --generate-notes` can
+          # diff against the previous tag.
+          fetch-depth: 0
+          # Use the default GITHUB_TOKEN to push the bump commit + tag.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate the requested version is newer than the current one
+        run: |
+          set -euo pipefail
+          requested="${{ inputs.version }}"
+          current=$(node -p "require('./package.json').version")
+          echo "Current: $current"
+          echo "Requested: $requested"
+          if [ "$current" = "$requested" ]; then
+            echo "::error::Requested version $requested is the same as the current version. Pick a higher one."
+            exit 1
+          fi
+          # Lexicographic vs numeric: use sort -V (version sort) to make
+          # sure the requested version is strictly greater.
+          highest=$(printf '%s\n%s\n' "$current" "$requested" | sort -V | tail -n1)
+          if [ "$highest" != "$requested" ]; then
+            echo "::error::Requested version $requested is not greater than current $current."
+            exit 1
+          fi
+
+      - name: Bump version metadata
+        run: npm run bump-version -- "${{ inputs.version }}"
+
+      - name: Verify the bump landed in every manifest
+        run: npm run check-version
+
+      - name: Run tests against the bumped tree
+        run: npm test
+
+      - name: Configure git committer
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Commit, tag, and push
+        run: |
+          set -euo pipefail
+          version="${{ inputs.version }}"
+          git add package.json package-lock.json plugins/opencode/.claude-plugin/plugin.json .claude-plugin/marketplace.json
+          git commit -m "chore(release): v${version}"
+          git tag -a "v${version}" -m "Release v${version}"
+          git push origin HEAD:main
+          git push origin "v${version}"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ inputs.version }}" \
+            --title "v${{ inputs.version }}" \
+            --generate-notes
