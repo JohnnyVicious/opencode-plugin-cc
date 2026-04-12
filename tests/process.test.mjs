@@ -1,6 +1,13 @@
-import { describe, it } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { runCommand } from "../plugins/opencode/scripts/lib/process.mjs";
+import fs from "node:fs";
+import path from "node:path";
+import { createTmpDir, cleanupTmpDir } from "./helpers.mjs";
+import {
+  runCommand,
+  findOpencodeAuthFile,
+  getConfiguredProviders,
+} from "../plugins/opencode/scripts/lib/process.mjs";
 
 describe("process", () => {
   it("runCommand captures stdout", async () => {
@@ -17,5 +24,84 @@ describe("process", () => {
   it("runCommand captures stderr", async () => {
     const { stderr, exitCode } = await runCommand("sh", ["-c", "echo err >&2"]);
     assert.ok(stderr.includes("err"));
+  });
+});
+
+// Tests for OpenCode auth.json discovery + provider detection.
+//
+// We override XDG_DATA_HOME to point at an isolated tmp dir so the test
+// reads our fixture instead of the developer's real ~/.local/share auth
+// file. The "missing file" case is intentionally not asserted here because
+// `findOpencodeAuthFile` falls through to the platform-default path
+// (~/.local/share/opencode/auth.json on Linux), which may legitimately
+// exist on a developer machine and would make the assertion non-portable.
+
+describe("OpenCode provider discovery", () => {
+  let tmpDir;
+  let savedXdg;
+
+  beforeEach(() => {
+    tmpDir = createTmpDir("opencode-auth");
+    savedXdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = tmpDir;
+  });
+
+  afterEach(() => {
+    cleanupTmpDir(tmpDir);
+    if (savedXdg === undefined) {
+      delete process.env.XDG_DATA_HOME;
+    } else {
+      process.env.XDG_DATA_HOME = savedXdg;
+    }
+  });
+
+  function writeAuthJson(content) {
+    const dir = path.join(tmpDir, "opencode");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "auth.json"), content);
+    return path.join(dir, "auth.json");
+  }
+
+  it("findOpencodeAuthFile picks up XDG_DATA_HOME first", () => {
+    const expected = writeAuthJson("{}");
+    const found = findOpencodeAuthFile();
+    assert.equal(found, expected);
+  });
+
+  it("getConfiguredProviders returns top-level keys for valid auth.json", () => {
+    writeAuthJson(JSON.stringify({ openrouter: { type: "api", key: "x" } }));
+    assert.deepEqual(getConfiguredProviders(), ["openrouter"]);
+  });
+
+  it("getConfiguredProviders returns multiple providers", () => {
+    writeAuthJson(
+      JSON.stringify({
+        openrouter: { type: "api", key: "x" },
+        openai: { type: "oauth", token: "y" },
+        anthropic: { type: "api", key: "z" },
+      })
+    );
+    const providers = getConfiguredProviders().sort();
+    assert.deepEqual(providers, ["anthropic", "openai", "openrouter"]);
+  });
+
+  it("getConfiguredProviders returns [] for an empty auth.json object", () => {
+    writeAuthJson("{}");
+    assert.deepEqual(getConfiguredProviders(), []);
+  });
+
+  it("getConfiguredProviders returns [] for malformed JSON", () => {
+    writeAuthJson("not valid json {{");
+    assert.deepEqual(getConfiguredProviders(), []);
+  });
+
+  it("getConfiguredProviders returns [] when auth.json is a JSON array", () => {
+    writeAuthJson(JSON.stringify(["not", "an", "object"]));
+    assert.deepEqual(getConfiguredProviders(), []);
+  });
+
+  it("getConfiguredProviders returns [] when auth.json is a JSON null", () => {
+    writeAuthJson("null");
+    assert.deepEqual(getConfiguredProviders(), []);
   });
 });
