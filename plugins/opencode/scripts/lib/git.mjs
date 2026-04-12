@@ -70,6 +70,22 @@ export async function getDiffStat(cwd, opts = {}) {
 }
 
 /**
+ * Measure the byte size of a git diff without streaming the full contents
+ * back to the caller. Useful for "is this diff too big to inline?" checks.
+ *
+ * @param {string} cwd
+ * @param {{ base?: string, cached?: boolean }} [opts]
+ * @returns {Promise<number>}
+ */
+export async function getDiffByteSize(cwd, opts = {}) {
+  const args = ["diff"];
+  if (opts.base) args.push(`${opts.base}...HEAD`);
+  else if (opts.cached) args.push("--cached");
+  const { stdout } = await runCommand("git", args, { cwd });
+  return Buffer.byteLength(stdout, "utf8");
+}
+
+/**
  * Get git status (short format).
  * @param {string} cwd
  * @returns {Promise<string>}

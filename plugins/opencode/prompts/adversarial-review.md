@@ -78,6 +78,10 @@ Before finalizing, check that each finding is:
 - actionable for an engineer fixing the issue
 </final_check>
 
+<review_collection_guidance>
+{{REVIEW_COLLECTION_GUIDANCE}}
+</review_collection_guidance>
+
 <repository_context>
 {{REVIEW_INPUT}}
 </repository_context>
