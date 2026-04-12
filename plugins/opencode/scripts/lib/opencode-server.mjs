@@ -2,20 +2,41 @@
 // Unlike codex-plugin-cc which uses JSON-RPC over stdin/stdout,
 // OpenCode exposes a REST API + SSE. This module wraps that API.
 //
-// Modified by JohnnyVicious (2026): `ensureServer` now spawns opencode
-// with `stdio: "ignore"` instead of piping stdout/stderr that nothing
-// reads. The piped streams were ref'd handles on the parent event loop,
-// which deadlocked any long-lived parent (e.g. `node:test`) once
-// opencode wrote enough log output to fill the pipe buffer. In normal
-// CLI usage the deadlock was masked because the companion script exited
-// before the buffer filled. (Apache License 2.0 §4(b) modification
-// notice — see NOTICE.)
+// Modified by JohnnyVicious (2026):
+//   - `ensureServer` spawns opencode with `stdio: "ignore"` instead of
+//     piping stdout/stderr that nothing reads. The piped streams were
+//     ref'd handles on the parent event loop, which deadlocked any
+//     long-lived parent (e.g. `node:test`) once opencode wrote enough
+//     log output to fill the pipe buffer. In normal CLI usage the
+//     deadlock was masked because the companion script exited before
+//     the buffer filled.
+//   - `ensureServer` also threads `OPENCODE_CONFIG_DIR` into the spawned
+//     server so our bundled `opencode-config/agent/review.md` custom
+//     agent is discovered. We prefer a dedicated read-only agent over
+//     OpenCode's built-in `plan` agent for reviews: `plan` injects a
+//     synthetic user-message directive ("Plan mode ACTIVE... produce an
+//     implementation plan") that overrides our review prompt and causes
+//     OpenCode to return plans instead of reviews.
+// (Apache License 2.0 §4(b) modification notice — see NOTICE.)
 
 import { spawn } from "node:child_process";
+import path from "node:path";
 
 const DEFAULT_PORT = 4096;
 const DEFAULT_HOST = "127.0.0.1";
 const SERVER_START_TIMEOUT = 30_000;
+
+/**
+ * Resolve the bundled opencode config directory shipped inside the plugin.
+ * This is what we pass as OPENCODE_CONFIG_DIR so the custom `review` agent
+ * (at `opencode-config/agent/review.md`) gets discovered.
+ * @returns {string|null}
+ */
+export function getBundledConfigDir() {
+  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
+  if (!pluginRoot) return null;
+  return path.join(pluginRoot, "opencode-config");
+}
 
 /**
  * Check if an OpenCode server is already running on the given port.
@@ -56,10 +77,24 @@ export async function ensureServer(opts = {}) {
   // them creates ref'd file descriptors on the parent that prevent any
   // long-lived parent (notably `node:test`) from exiting cleanly once
   // opencode writes enough output to fill the pipe buffer.
+  //
+  // `OPENCODE_CONFIG_DIR` points opencode at our bundled config dir so
+  // the custom `review` agent is discovered. We only set it when we
+  // actually spawn the server — if the user already has a server
+  // running, they get whatever config that server was started with, and
+  // the caller is expected to fall back to `build` when `review` is
+  // unavailable.
+  const env = { ...process.env };
+  const bundledConfigDir = getBundledConfigDir();
+  if (bundledConfigDir) {
+    env.OPENCODE_CONFIG_DIR = bundledConfigDir;
+  }
+
   const proc = spawn("opencode", ["serve", "--port", String(port)], {
     stdio: "ignore",
     detached: true,
     cwd: opts.cwd,
+    env,
   });
   proc.unref();
 
@@ -148,6 +183,10 @@ export function createClient(baseUrl, opts = {}) {
       if (opts.agent) body.agent = opts.agent;
       if (opts.model) body.model = opts.model;
       if (opts.system) body.system = opts.system;
+      // `tools` is a per-call override map: `{ write: false, edit: false, ... }`.
+      // Used by the review fallback path to enforce read-only behavior when
+      // the custom `review` agent isn't available on a pre-running server.
+      if (opts.tools) body.tools = opts.tools;
 
       const res = await fetch(`${baseUrl}/session/${sessionId}/message`, {
         method: "POST",
@@ -204,7 +243,7 @@ export function createClient(baseUrl, opts = {}) {
  * @returns {Promise<ReturnType<typeof createClient> & { serverInfo: object }>}
  */
 export async function connect(opts = {}) {
-  const { url } = await ensureServer(opts);
+  const { url, alreadyRunning } = await ensureServer(opts);
   const client = createClient(url, { directory: opts.cwd });
-  return { ...client, serverInfo: { url } };
+  return { ...client, serverInfo: { url, alreadyRunning } };
 }

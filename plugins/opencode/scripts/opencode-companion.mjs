@@ -16,7 +16,23 @@
 //     user's configured credentials;
 //   - extract the model OpenCode actually used (from `response.info.model`)
 //     and prepend it as a `**Model:** ...` header to every review output
-//     so users always see which model produced the review.
+//     so users always see which model produced the review;
+//   - switch reviews from OpenCode's built-in `plan` agent to a custom
+//     `review` agent shipped in the plugin. OpenCode's `plan` agent
+//     injects a synthetic user-message directive ("Plan mode ACTIVE —
+//     STRICTLY FORBIDDEN... produce an implementation plan") on every
+//     turn, which dominates our review system prompt and makes OpenCode
+//     return implementation plans instead of the requested review. A
+//     custom agent with read-only permissions and a neutral prompt body
+//     sidesteps the injection entirely. When our agent isn't available
+//     (e.g. the user already had a server running without our config
+//     dir), we fall back to the `build` agent with per-call tool
+//     restrictions and a warning;
+//   - parse `--model <provider>/<model-id>` into OpenCode's required
+//     `{providerID, modelID}` object before sending. Passing the raw
+//     CLI string caused HTTP 400 ("expected object, received string")
+//     on every `--model` invocation — the original threading commit
+//     wired the argument through but never adapted the shape.
 // (Apache License 2.0 §4(b) modification notice.)
 
 import path from "node:path";
@@ -41,6 +57,8 @@ import {
 import { buildReviewPrompt, buildTaskPrompt } from "./lib/prompts.mjs";
 import { getDiff, getStatus as getGitStatus, detectPrReference } from "./lib/git.mjs";
 import { readJson } from "./lib/fs.mjs";
+import { resolveReviewAgent } from "./lib/review-agent.mjs";
+import { parseModelString } from "./lib/model.mjs";
 
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(import.meta.dirname, "..");
 
@@ -169,12 +187,16 @@ async function handleReview(argv) {
         adversarial: false,
       }, PLUGIN_ROOT);
 
+      const reviewAgent = await resolveReviewAgent(client, log);
+      const model = parseModelString(options.model);
+
       report("reviewing", "Running review...");
-      log(`Prompt length: ${prompt.length} chars${options.model ? `, model: ${options.model}` : ""}${prNumber ? `, pr: #${prNumber}` : ""}`);
+      log(`Prompt length: ${prompt.length} chars, agent: ${reviewAgent.agent}${options.model ? `, model: ${options.model}` : ""}${prNumber ? `, pr: #${prNumber}` : ""}`);
 
       const response = await client.sendPrompt(session.id, prompt, {
-        agent: "plan", // read-only agent for reviews
-        model: options.model,
+        agent: reviewAgent.agent,
+        model,
+        tools: reviewAgent.tools,
       });
 
       report("finalizing", "Processing review output...");
@@ -249,12 +271,16 @@ async function handleAdversarialReview(argv) {
         focus,
       }, PLUGIN_ROOT);
 
+      const reviewAgent = await resolveReviewAgent(client, log);
+      const model = parseModelString(options.model);
+
       report("reviewing", "Running adversarial review...");
-      log(`Prompt length: ${prompt.length} chars, focus: ${focus || "(none)"}${options.model ? `, model: ${options.model}` : ""}${prNumber ? `, pr: #${prNumber}` : ""}`);
+      log(`Prompt length: ${prompt.length} chars, agent: ${reviewAgent.agent}, focus: ${focus || "(none)"}${options.model ? `, model: ${options.model}` : ""}${prNumber ? `, pr: #${prNumber}` : ""}`);
 
       const response = await client.sendPrompt(session.id, prompt, {
-        agent: "plan",
-        model: options.model,
+        agent: reviewAgent.agent,
+        model,
+        tools: reviewAgent.tools,
       });
 
       report("finalizing", "Processing review output...");

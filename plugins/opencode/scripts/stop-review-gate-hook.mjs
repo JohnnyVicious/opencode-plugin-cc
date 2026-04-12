@@ -10,6 +10,7 @@ import path from "node:path";
 import { resolveWorkspace } from "./lib/workspace.mjs";
 import { loadState } from "./lib/state.mjs";
 import { isServerRunning, connect } from "./lib/opencode-server.mjs";
+import { resolveReviewAgent } from "./lib/review-agent.mjs";
 
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(import.meta.dirname, "..");
 
@@ -60,8 +61,14 @@ async function main() {
     const client = await connect({ cwd: workspace });
     const session = await client.createSession({ title: "Stop Review Gate" });
 
+    // Prefer the custom `review` agent; fall back to `build` + tool
+    // overrides if the running server doesn't have our custom agent.
+    // See lib/review-agent.mjs for the rationale.
+    const reviewAgent = await resolveReviewAgent(client);
+
     const response = await client.sendPrompt(session.id, prompt, {
-      agent: "plan", // read-only review
+      agent: reviewAgent.agent,
+      tools: reviewAgent.tools,
     });
 
     // Extract the verdict
