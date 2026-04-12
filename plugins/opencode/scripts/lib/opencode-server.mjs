@@ -1,6 +1,15 @@
 // OpenCode HTTP API client.
 // Unlike codex-plugin-cc which uses JSON-RPC over stdin/stdout,
 // OpenCode exposes a REST API + SSE. This module wraps that API.
+//
+// Modified by JohnnyVicious (2026): `ensureServer` now spawns opencode
+// with `stdio: "ignore"` instead of piping stdout/stderr that nothing
+// reads. The piped streams were ref'd handles on the parent event loop,
+// which deadlocked any long-lived parent (e.g. `node:test`) once
+// opencode wrote enough log output to fill the pipe buffer. In normal
+// CLI usage the deadlock was masked because the companion script exited
+// before the buffer filled. (Apache License 2.0 §4(b) modification
+// notice — see NOTICE.)
 
 import { spawn } from "node:child_process";
 
@@ -42,9 +51,13 @@ export async function ensureServer(opts = {}) {
     return { url, alreadyRunning: true };
   }
 
-  // Start the server
+  // Start the server.
+  // `stdio: "ignore"` is critical: piping stdout/stderr without draining
+  // them creates ref'd file descriptors on the parent that prevent any
+  // long-lived parent (notably `node:test`) from exiting cleanly once
+  // opencode writes enough output to fill the pipe buffer.
   const proc = spawn("opencode", ["serve", "--port", String(port)], {
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: "ignore",
     detached: true,
     cwd: opts.cwd,
   });
