@@ -54,11 +54,22 @@ export function parseModelString(input) {
 }
 
 /**
- * Regex matching OpenCode's free-tier model suffixes. All 31 free
- * models currently surfaced by `opencode models` either end in `:free`
- * (the OpenRouter convention) or `-free` (the opencode/* convention).
+ * Regex matching OpenCode's free-tier model suffixes. `:free` is the
+ * OpenRouter convention, `-free` is the opencode/* convention.
  */
 const FREE_MODEL_SUFFIX = /(?::free|-free)$/i;
+
+/**
+ * Regex restricting `--free` picks to the first-party `opencode/*`
+ * provider. OpenRouter's `:free` models have highly variable tool-use
+ * support (many route to endpoints that return
+ * `No endpoints found that support tool use`), which breaks the
+ * review agent since it needs read/grep/glob/list. First-party
+ * `opencode/*` models always support tool use, so restricting `--free`
+ * to that provider makes the flag reliable by default. Users who need
+ * a specific non-opencode model can still use `--model <id>`.
+ */
+const OPENCODE_PROVIDER = /^opencode\//i;
 
 /**
  * Shell out to `opencode models` and return the raw newline-separated
@@ -85,13 +96,15 @@ export async function listOpencodeModels({ run = runCommand } = {}) {
 }
 
 /**
- * Pick a free-tier model at random from `opencode models`. Returns the
- * usual `{providerID, modelID, raw}` triple so callers can pass it to
- * `sendPrompt` and log the raw form.
+ * Pick a free-tier model at random from `opencode models`. Restricts
+ * the pool to the first-party `opencode/*` provider so the chosen
+ * model always supports tool use (see `OPENCODE_PROVIDER` above for
+ * the rationale). Returns the usual `{providerID, modelID, raw}`
+ * triple so callers can pass it to `sendPrompt` and log the raw form.
  *
- * Throws a descriptive error if the user has no free models available,
- * so `--free` invocations fail loudly instead of silently falling back
- * to a paid default.
+ * Throws a descriptive error if the user has no `opencode/*` free
+ * models available, so `--free` invocations fail loudly instead of
+ * silently falling back to a paid default.
  *
  * @param {object} [opts]
  * @param {() => number} [opts.rng] - deterministic rng for tests, default Math.random
@@ -100,13 +113,17 @@ export async function listOpencodeModels({ run = runCommand } = {}) {
  */
 export async function selectFreeModel({ rng = Math.random, run } = {}) {
   const models = await listOpencodeModels(run ? { run } : {});
-  const free = models.filter((m) => FREE_MODEL_SUFFIX.test(m));
+  const free = models.filter(
+    (m) => FREE_MODEL_SUFFIX.test(m) && OPENCODE_PROVIDER.test(m),
+  );
 
   if (free.length === 0) {
     throw new Error(
-      "`--free` was requested, but `opencode models` returned no free-tier " +
-      "models (nothing ending in `:free` or `-free`). Configure a provider " +
-      "that offers a free tier (e.g. openrouter) via `/opencode:setup`."
+      "`--free` was requested, but `opencode models` returned no first-party " +
+      "`opencode/*` free-tier models. `--free` is restricted to opencode-native " +
+      "models because OpenRouter free-tier models have inconsistent tool-use " +
+      "support. Use `--model <id>` to target a specific free model on another " +
+      "provider, or run `/opencode:setup` to configure the opencode provider."
     );
   }
 

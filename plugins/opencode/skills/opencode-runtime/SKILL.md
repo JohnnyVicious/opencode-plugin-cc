@@ -25,7 +25,7 @@ Command selection:
 - Use exactly one `task` invocation per rescue handoff.
 - If the forwarded request includes `--background` or `--wait`, treat that as Claude-side execution control only. Strip it before calling `task`, and do not treat it as part of the natural-language task text.
 - If the forwarded request includes `--model`, pass it through to `task`.
-- If the forwarded request includes `--free`, pass it through to `task`. The companion will shell out to `opencode models`, filter for free-tier entries (`:free` or `-free`), and pick one at random.
+- If the forwarded request includes `--free`, pass it through to `task`. The companion will shell out to `opencode models`, filter for first-party `opencode/*` free-tier entries (`:free` or `-free`), and pick one at random. `--free` is restricted to `opencode/*` because OpenRouter free models have inconsistent tool-use support.
 - If the forwarded request includes both `--free` and `--model`, do not invoke `task` — return nothing, because the companion will reject the combination.
 - If the forwarded request includes `--agent`, pass it through to `task`.
 - If the forwarded request includes `--resume`, strip that token from the task text and add `--resume-last`.

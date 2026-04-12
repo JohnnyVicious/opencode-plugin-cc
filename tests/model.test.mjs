@@ -131,51 +131,79 @@ describe("listOpencodeModels", () => {
 });
 
 describe("selectFreeModel", () => {
-  it("picks a free-suffixed model and returns {providerID, modelID, raw}", async () => {
+  it("picks the first opencode/* free model when rng=0", async () => {
     const run = makeFakeRun(FAKE_OPENCODE_MODELS_STDOUT);
-    // rng=0 → first item in the filtered list
     const result = await selectFreeModel({ run, rng: () => 0 });
     assert.equal(result.raw, "opencode/minimax-m2.5-free");
     assert.equal(result.providerID, "opencode");
     assert.equal(result.modelID, "minimax-m2.5-free");
   });
 
-  it("picks the last free model when rng returns just under 1", async () => {
+  it("picks the last opencode/* free model when rng returns just under 1", async () => {
     const run = makeFakeRun(FAKE_OPENCODE_MODELS_STDOUT);
     const result = await selectFreeModel({ run, rng: () => 0.999999 });
-    assert.equal(result.raw, "openrouter/moonshotai/kimi-k2:free");
+    // Fixture has two opencode/* free models; last is opencode/nemotron-3-super-free.
+    assert.equal(result.raw, "opencode/nemotron-3-super-free");
   });
 
   it("honors the injected rng deterministically", async () => {
     const run = makeFakeRun(FAKE_OPENCODE_MODELS_STDOUT);
-    // 6 free models in the fixture; rng=0.5 → idx=3
+    // 2 opencode/* free models; rng=0.5 → idx=1.
     const result = await selectFreeModel({ run, rng: () => 0.5 });
-    assert.equal(result.raw, "openrouter/google/gemma-3-4b-it:free");
+    assert.equal(result.raw, "opencode/nemotron-3-super-free");
+  });
+
+  it("excludes openrouter/* free models even though they match the suffix regex", async () => {
+    const run = makeFakeRun(FAKE_OPENCODE_MODELS_STDOUT);
+    const seen = new Set();
+    for (let i = 0; i < 20; i += 1) {
+      const r = await selectFreeModel({ run, rng: () => i / 20 });
+      seen.add(r.raw);
+    }
+    // Only the two opencode/* free entries should ever be picked,
+    // never any of the openrouter/* ":free" entries in the fixture.
+    assert.deepEqual(
+      [...seen].sort(),
+      ["opencode/minimax-m2.5-free", "opencode/nemotron-3-super-free"],
+    );
   });
 
   it("only picks models whose suffix is :free or -free (not substring 'free' elsewhere)", async () => {
     const run = makeFakeRun([
-      "openrouter/acme/freedom-v1",    // contains free but doesn't end with the suffix
-      "openrouter/acme/model-free",     // -free suffix ✓
-      "openrouter/acme/other:free",     // :free suffix ✓
+      "opencode/freedom-v1",    // contains free but doesn't end with the suffix
+      "opencode/model-free",    // -free suffix ✓
+      "opencode/other:free",    // :free suffix ✓
     ].join("\n"));
-    // Run many times to verify only the two legitimate free models are picked
     const seen = new Set();
     for (let i = 0; i < 20; i += 1) {
       const r = await selectFreeModel({ run, rng: () => i / 20 });
       seen.add(r.raw);
     }
     assert.equal(seen.size, 2);
-    assert.ok(seen.has("openrouter/acme/model-free"));
-    assert.ok(seen.has("openrouter/acme/other:free"));
-    assert.ok(!seen.has("openrouter/acme/freedom-v1"));
+    assert.ok(seen.has("opencode/model-free"));
+    assert.ok(seen.has("opencode/other:free"));
+    assert.ok(!seen.has("opencode/freedom-v1"));
   });
 
-  it("throws a descriptive error when no free models are available", async () => {
-    const run = makeFakeRun("openrouter/anthropic/claude-haiku-4.5\nopencode/big-pickle\n");
+  it("throws a descriptive error when no opencode/* free models are available", async () => {
+    // Has openrouter/* free models (which we now reject) but no opencode/* ones.
+    const run = makeFakeRun([
+      "opencode/big-pickle",                          // opencode but not free
+      "openrouter/anthropic/claude-haiku-4.5",        // neither
+      "openrouter/google/gemma-3-27b-it:free",        // free but wrong provider
+      "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+    ].join("\n"));
     await assert.rejects(
       () => selectFreeModel({ run, rng: () => 0.5 }),
-      /no free-tier models/i,
+      /no first-party `opencode\/\*` free-tier models/i,
+    );
+  });
+
+  it("throws when there are no free models at all", async () => {
+    const run = makeFakeRun("opencode/big-pickle\nopencode/gpt-5-nano\n");
+    await assert.rejects(
+      () => selectFreeModel({ run, rng: () => 0.5 }),
+      /no first-party `opencode\/\*` free-tier models/i,
     );
   });
 

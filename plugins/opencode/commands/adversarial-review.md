@@ -38,7 +38,7 @@ Argument handling:
 - Adversarial reviews support custom focus text. Any text after flags is treated as a focus area.
 - The companion script handles `--adversarial` internally.
 - `--model <id>` overrides OpenCode's default model for this single review (e.g. `--model openrouter/anthropic/claude-opus-4-6`). Pass it through verbatim if the user supplied it.
-- `--free` tells the companion script to shell out to `opencode models`, filter for free-tier models (those ending in `:free` or `-free`), and pick one at random for this review. Pass it through verbatim if the user supplied it. `--free` and `--model` are mutually exclusive — the companion will error if both are given.
+- `--free` tells the companion script to shell out to `opencode models`, filter for first-party `opencode/*` free-tier models (those ending in `:free` or `-free`), and pick one at random for this review. Restricted to the `opencode/*` provider because OpenRouter free-tier models have inconsistent tool-use support, and the review agent needs `read`/`grep`/`glob`/`list`. Pass it through verbatim if the user supplied it. `--free` and `--model` are mutually exclusive — the companion will error if both are given.
 - `--pr <number>` reviews a GitHub pull request via `gh pr diff` instead of the local working tree. The cwd must be a git repo whose remote points at the PR's repository, and `gh` must be installed and authenticated.
 
 PR reference extraction (REQUIRED — read this carefully):
