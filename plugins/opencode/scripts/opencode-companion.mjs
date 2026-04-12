@@ -13,7 +13,10 @@
 //   - `handleSetup` reads OpenCode's auth.json directly via
 //     `getConfiguredProviders` instead of probing the `GET /provider` HTTP
 //     endpoint, which returns a TypeScript schema dump rather than the
-//     user's configured credentials.
+//     user's configured credentials;
+//   - extract the model OpenCode actually used (from `response.info.model`)
+//     and prepend it as a `**Model:** ...` header to every review output
+//     so users always see which model produced the review.
 // (Apache License 2.0 §4(b) modification notice.)
 
 import path from "node:path";
@@ -27,7 +30,14 @@ import { resolveWorkspace } from "./lib/workspace.mjs";
 import { loadState, updateState, upsertJob, generateJobId, jobDataPath } from "./lib/state.mjs";
 import { buildStatusSnapshot, resolveResultJob, resolveCancelableJob, enrichJob } from "./lib/job-control.mjs";
 import { createJobRecord, runTrackedJob, getClaudeSessionId } from "./lib/tracked-jobs.mjs";
-import { renderStatus, renderResult, renderReview, renderSetup } from "./lib/render.mjs";
+import {
+  renderStatus,
+  renderResult,
+  renderReview,
+  renderSetup,
+  extractResponseModel,
+  formatModelHeader,
+} from "./lib/render.mjs";
 import { buildReviewPrompt, buildTaskPrompt } from "./lib/prompts.mjs";
 import { getDiff, getStatus as getGitStatus, detectPrReference } from "./lib/git.mjs";
 import { readJson } from "./lib/fs.mjs";
@@ -172,11 +182,13 @@ async function handleReview(argv) {
       // Try to parse structured output
       const text = extractResponseText(response);
       let structured = tryParseJson(text);
+      const usedModel = extractResponseModel(response);
 
       return {
-        rendered: structured ? renderReview(structured) : text,
+        rendered: formatModelHeader(usedModel) + (structured ? renderReview(structured) : text),
         raw: response,
         structured,
+        model: usedModel,
       };
     });
 
@@ -249,11 +261,13 @@ async function handleAdversarialReview(argv) {
 
       const text = extractResponseText(response);
       let structured = tryParseJson(text);
+      const usedModel = extractResponseModel(response);
 
       return {
-        rendered: structured ? renderReview(structured) : text,
+        rendered: formatModelHeader(usedModel) + (structured ? renderReview(structured) : text),
         raw: response,
         structured,
+        model: usedModel,
       };
     });
 
@@ -584,6 +598,7 @@ function extractResponseText(response) {
 
   return JSON.stringify(response, null, 2);
 }
+
 
 /**
  * Try to parse a string as JSON, returning null on failure.
