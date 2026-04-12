@@ -9,7 +9,11 @@
 //     so callers can override OpenCode's default model per review;
 //   - accept `--pr <N>` (with `PR #N` focus auto-detect for adversarial)
 //     and fetch PR diffs via `gh pr diff` so reviews can target a GitHub
-//     pull request without checking it out.
+//     pull request without checking it out;
+//   - `handleSetup` reads OpenCode's auth.json directly via
+//     `getConfiguredProviders` instead of probing the `GET /provider` HTTP
+//     endpoint, which returns a TypeScript schema dump rather than the
+//     user's configured credentials.
 // (Apache License 2.0 §4(b) modification notice.)
 
 import path from "node:path";
@@ -17,7 +21,7 @@ import process from "node:process";
 import fs from "node:fs";
 
 import { parseArgs, extractTaskText } from "./lib/args.mjs";
-import { isOpencodeInstalled, getOpencodeVersion, spawnDetached } from "./lib/process.mjs";
+import { isOpencodeInstalled, getOpencodeVersion, spawnDetached, getConfiguredProviders } from "./lib/process.mjs";
 import { isServerRunning, ensureServer, createClient, connect } from "./lib/opencode-server.mjs";
 import { resolveWorkspace } from "./lib/workspace.mjs";
 import { loadState, updateState, upsertJob, generateJobId, jobDataPath } from "./lib/state.mjs";
@@ -78,17 +82,13 @@ async function handleSetup(argv) {
   if (installed) {
     serverRunning = await isServerRunning();
 
-    if (serverRunning) {
-      try {
-        const client = createClient("http://127.0.0.1:4096");
-        const providerList = await client.listProviders();
-        if (Array.isArray(providerList)) {
-          providers = providerList.map((p) => p.id ?? p.name).filter(Boolean);
-        }
-      } catch {
-        // Server may not be fully ready
-      }
-    }
+    // Read configured providers directly from OpenCode's auth.json. The
+    // HTTP `GET /provider` endpoint returns a TypeScript schema dump, not
+    // the user's credentials, and `GET /provider/auth` only lists which
+    // auth methods each provider supports. auth.json is the same source
+    // of truth that `opencode providers list` uses, and it works whether
+    // or not the OpenCode server is running.
+    providers = getConfiguredProviders();
   }
 
   // Handle review gate toggle
