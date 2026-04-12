@@ -41,6 +41,7 @@ Argument handling:
 - If the user needs custom review instructions or more adversarial framing, they should use `/opencode:adversarial-review`.
 - `--model <id>` overrides OpenCode's default model for this single review (e.g. `--model openrouter/anthropic/claude-opus-4-6`). Pass it through verbatim if the user supplied it.
 - `--pr <number>` reviews a GitHub pull request via `gh pr diff` instead of the local working tree. The cwd must be a git repo whose remote points at the PR's repository, and `gh` must be installed and authenticated. Pass it through verbatim if the user supplied it.
+- **PR reference extraction (REQUIRED)**: if the user's input contains a PR reference like `PR #390`, `pr #390`, `PR 390`, or `pr 390` (e.g. `/opencode:review on PR #390`), you MUST extract the number yourself and pass it as `--pr 390`. Do not pass `PR #390` literally to bash — bash strips unquoted `#NNN` tokens as comments before they reach the companion script. Example: `node ... review --pr 390`, NOT `node ... review on PR #390`.
 
 Foreground flow:
 - Run:
