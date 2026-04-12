@@ -14,15 +14,44 @@ import os from "node:os";
 import path from "node:path";
 
 /**
+ * Shell option for child_process.spawn that is correct on every platform:
+ *
+ * - POSIX: `false` — pass argv directly to `execvp`.
+ * - Windows: if `$SHELL` points at a POSIX shell (Git Bash, MSYS), use it so
+ *   users who wrote their PATH for Git Bash don't get cmd.exe behavior.
+ *   Otherwise `true` falls back to Node's default (cmd.exe), which is still
+ *   needed so .cmd / .bat shims resolve.
+ *
+ * Without this, bare names like `opencode`, `git`, `gh`, `where` spawned on
+ * Windows hit ENOENT because Node won't resolve .cmd shims on its own.
+ * @returns {string|true|false}
+ */
+export function platformShellOption() {
+  if (process.platform !== "win32") return false;
+  return process.env.SHELL || true;
+}
+
+/**
  * Resolve the full path to the `opencode` binary.
  * @returns {Promise<string|null>}
  */
 export async function resolveOpencodeBinary() {
   return new Promise((resolve) => {
-    const proc = spawn("which", ["opencode"], { stdio: ["ignore", "pipe", "ignore"] });
+    const isWin = process.platform === "win32";
+    const locator = isWin ? "where" : "which";
+    const proc = spawn(locator, ["opencode"], {
+      stdio: ["ignore", "pipe", "ignore"],
+      shell: platformShellOption(),
+      windowsHide: true,
+    });
     let out = "";
     proc.stdout.on("data", (d) => (out += d));
-    proc.on("close", (code) => resolve(code === 0 ? out.trim() : null));
+    proc.on("close", (code) => {
+      if (code !== 0) return resolve(null);
+      // `where` returns all matches separated by CRLF; pick the first.
+      const first = out.trim().split(/\r?\n/)[0] ?? "";
+      resolve(first || null);
+    });
   });
 }
 
@@ -43,6 +72,8 @@ export async function getOpencodeVersion() {
   return new Promise((resolve) => {
     const proc = spawn("opencode", ["--version"], {
       stdio: ["ignore", "pipe", "ignore"],
+      shell: platformShellOption(),
+      windowsHide: true,
     });
     let out = "";
     proc.stdout.on("data", (d) => (out += d));
@@ -63,6 +94,8 @@ export function runCommand(cmd, args, opts = {}) {
       stdio: ["ignore", "pipe", "pipe"],
       cwd: opts.cwd,
       env: { ...process.env, ...opts.env },
+      shell: platformShellOption(),
+      windowsHide: true,
     });
     let stdout = "";
     let stderr = "";
@@ -85,6 +118,8 @@ export function spawnDetached(cmd, args, opts = {}) {
     detached: true,
     cwd: opts.cwd,
     env: { ...process.env, ...opts.env },
+    shell: platformShellOption(),
+    windowsHide: true,
   });
   child.unref();
   return child;

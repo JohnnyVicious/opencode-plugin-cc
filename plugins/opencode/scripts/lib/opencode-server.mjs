@@ -21,6 +21,7 @@
 
 import { spawn } from "node:child_process";
 import path from "node:path";
+import { platformShellOption } from "./process.mjs";
 
 const DEFAULT_PORT = 4096;
 const DEFAULT_HOST = "127.0.0.1";
@@ -95,6 +96,8 @@ export async function ensureServer(opts = {}) {
     detached: true,
     cwd: opts.cwd,
     env,
+    shell: platformShellOption(),
+    windowsHide: true,
   });
   proc.unref();
 
