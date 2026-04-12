@@ -33,33 +33,29 @@ they already have.
 
 ## Install
 
-Inside Claude Code, run:
+Add the marketplace in Claude Code:
 
 ```
-! curl -fsSL https://raw.githubusercontent.com/tasict/opencode-plugin-cc/main/install.sh | bash
+/plugin marketplace add JohnnyVicious/opencode-plugin-cc
 ```
 
-Then reload the plugin:
+Install the plugin:
+
+```
+/plugin install opencode@johnnyvicious-opencode-plugin-cc
+```
+
+Reload plugins:
 
 ```
 /reload-plugins
 ```
 
-You should see:
-
-```
-Reloaded: 1 plugin · 7 skills · 6 agents · 3 hooks ...
-```
-
-Finally, verify your setup:
+Then verify your setup:
 
 ```
 /opencode:setup
 ```
-
-> **What the installer does**: Clones the repo to `~/.claude/plugins/marketplaces/`,
-> caches the plugin files, and registers it in Claude Code's plugin config.
-> It tries SSH first and falls back to HTTPS automatically.
 
 ### Set up an AI Provider
 
@@ -78,9 +74,13 @@ To check your configured providers:
 ### Uninstall
 
 ```
-/plugin uninstall opencode@tasict-opencode-plugin-cc
+/plugin uninstall opencode@johnnyvicious-opencode-plugin-cc
 /reload-plugins
 ```
+
+> **Migrating from the upstream `tasict-opencode-plugin-cc` install?** Run
+> `/plugin uninstall opencode@tasict-opencode-plugin-cc` once before the
+> install command above so the old marketplace entry is removed.
 
 ## Command Mapping (codex-plugin-cc -> opencode-plugin-cc)
 
@@ -113,19 +113,9 @@ When enabled via `/opencode:setup --enable-review-gate`, a Stop hook runs a targ
 <details>
 <summary><strong>Plugin not loading after install (0 plugins)</strong></summary>
 
-1. Re-run the installer: `! curl -fsSL https://raw.githubusercontent.com/tasict/opencode-plugin-cc/main/install.sh | bash`
-2. Run `/reload-plugins` again.
+1. Confirm the marketplace is registered: `/plugin marketplace list` should include `johnnyvicious-opencode-plugin-cc`. If not, re-run `/plugin marketplace add JohnnyVicious/opencode-plugin-cc`.
+2. Re-run `/plugin install opencode@johnnyvicious-opencode-plugin-cc` and then `/reload-plugins`.
 3. If still failing, restart Claude Code.
-</details>
-
-<details>
-<summary><strong>Install script fails to clone</strong></summary>
-
-The script tries SSH first, then HTTPS. If both fail:
-
-- Check your network connection
-- For SSH: ensure `ssh -T git@github.com` works
-- For HTTPS: run `gh auth login` to set up credentials
 </details>
 
 <details>
@@ -157,7 +147,7 @@ codex-plugin-cc                          opencode-plugin-cc
 ```
 opencode-plugin-cc/
 ├── .claude-plugin/marketplace.json       # Marketplace registration
-├── install.sh                            # One-line installer
+├── .github/workflows/ci.yml              # GitHub Actions CI
 ├── plugins/opencode/
 │   ├── .claude-plugin/plugin.json        # Plugin metadata
 │   ├── agents/opencode-rescue.md         # Rescue subagent definition
