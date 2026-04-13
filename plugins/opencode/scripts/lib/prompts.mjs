@@ -15,6 +15,7 @@ import {
   getPrInfo,
   getPrDiff,
 } from "./git.mjs";
+import { collectFolderContext } from "./fs.mjs";
 
 // Inline-diff thresholds. When a review exceeds either, we keep the prompt
 // bounded by including a diff excerpt instead of the full diff. The review
@@ -44,6 +45,7 @@ function truncateUtf8(text, maxBytes) {
  * @param {number} [opts.pr] - GitHub PR number to review (uses `gh pr diff`)
  * @param {boolean} [opts.adversarial] - use adversarial review prompt
  * @param {string} [opts.focus] - user-supplied focus text
+ * @param {string[]} [opts.paths] - specific paths to review instead of git diff
  * @param {string} pluginRoot - CLAUDE_PLUGIN_ROOT for reading prompt templates
  * @returns {Promise<string>}
  */
@@ -61,6 +63,50 @@ export async function buildReviewPrompt(cwd, opts, pluginRoot) {
   let prInfo = null;
   let diffStat = "";
   let overByteLimit = false;
+  let folderContext = null;
+
+  // Step 1: When --path is specified, collect folder context instead of git diff
+  if (opts.paths && opts.paths.length > 0 && !opts.pr) {
+    folderContext = await collectFolderContext(cwd, opts.paths, {
+      maxBytes,
+      maxFiles,
+    });
+    changedFiles = folderContext.files;
+    overByteLimit = folderContext.overflowed;
+    const diffBytes = folderContext.totalBytes;
+    const diffIsComplete = !folderContext.overflowed;
+    const collectionGuidance = buildCollectionGuidance(diffIsComplete);
+
+    const targetLabel = `Review of ${opts.paths.join(", ")}`;
+
+    const reviewContext = buildFolderContext(folderContext, {
+      diffIsComplete,
+      originalDiffBytes: diffBytes,
+      maxInlineDiffBytes: maxBytes,
+      overFileLimit: changedFiles.length > maxFiles,
+      overByteLimit: folderContext.overflowed,
+    });
+
+    let systemPrompt;
+    if (opts.adversarial) {
+      const templatePath = path.join(pluginRoot, "prompts", "adversarial-review.md");
+      systemPrompt = fs.readFileSync(templatePath, "utf8")
+        .replace("{{TARGET_LABEL}}", targetLabel)
+        .replace("{{USER_FOCUS}}", opts.focus || "General review")
+        .replace("{{REVIEW_COLLECTION_GUIDANCE}}", collectionGuidance)
+        .replace("{{REVIEW_INPUT}}", reviewContext);
+    } else {
+      systemPrompt = buildStandardReviewPrompt(folderContext.content, status, changedFiles, {
+        ...opts,
+        targetLabel,
+        prInfo,
+        reviewContext,
+        collectionGuidance,
+      });
+    }
+
+    return systemPrompt;
+  }
 
   // Step 1: cheap metadata. The status / changed-file list / shortstat
   // reads do not materialize the full diff and are safe on any size.
@@ -222,6 +268,44 @@ function buildReviewContext(diff, status, changedFiles, prInfo, opts = {}) {
 
   if (diff) {
     sections.push(`<diff>\n${diff}\n</diff>`);
+  }
+
+  return sections.join("\n\n");
+}
+
+/**
+ * Build the repository context block for folder/path-based review prompts.
+ * Uses <files> section instead of <diff> when context is collected from paths.
+ */
+function buildFolderContext(folderContext, opts = {}) {
+  const sections = [];
+
+  if (folderContext.files.length > 0) {
+    sections.push(`<files_reviewed>\n${folderContext.files.join("\n")}\n</files_reviewed>`);
+  }
+
+  if (opts.overFileLimit || opts.overByteLimit) {
+    const reasons = [];
+    if (opts.overFileLimit) reasons.push(`file count ${folderContext.files.length}`);
+    if (opts.overByteLimit) {
+      reasons.push(`content size ${opts.originalDiffBytes} bytes`);
+    }
+    const budget = opts.overByteLimit && opts.maxInlineDiffBytes
+      ? `; excerpt budget ${opts.maxInlineDiffBytes} bytes`
+      : "";
+    const note = opts.diffIsComplete === false
+      ? "File content is bounded"
+      : "Review spans multiple files, but all content is included";
+    sections.push(
+      `<content_note>\n` +
+      `${note} (${reasons.join(", ")}${budget}). ` +
+      `Findings must be supported by the file evidence below.\n` +
+      `</content_note>`
+    );
+  }
+
+  if (folderContext.content) {
+    sections.push(`<files>\n${folderContext.content}\n</files>`);
   }
 
   return sections.join("\n\n");
