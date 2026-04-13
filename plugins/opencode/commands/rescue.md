@@ -34,9 +34,9 @@ Flag handling (all of these are recognized, validated, and forwarded by `safe-co
 - `--worktree` — run OpenCode in an isolated git worktree instead of editing the working directory in-place.
 - `--resume` (or `--resume-last`) — continue the most recent OpenCode session from this Claude session. The bridge translates `--resume` into the companion-native `--resume-last`.
 - `--fresh` — explicit marker that the task must NOT resume. The bridge strips it (the absence of `--resume-last` already conveys "fresh").
-- `--model <provider/model-id>` — override OpenCode's default model for this single task. Value must match `[A-Za-z0-9._/:-]+`.
+- `--model <provider/model-id>` — override OpenCode's default model for this single task. Value must match `[A-Za-z0-9._/:-]+`. When `--model` and `--free` are both omitted, the companion applies the saved default model from `/opencode:setup --default-model` if one is configured.
 - `--free` — tells the companion to pick a random first-party `opencode/*` free-tier model from `opencode models`. Restricted to `opencode/*` because OpenRouter free models have inconsistent tool-use support.
-- `--agent <build|plan>` — override the OpenCode agent. Value must be `build` or `plan`.
+- `--agent <build|plan>` — override the OpenCode agent. Value must be `build` or `plan`. When `--agent` is omitted, the companion applies the saved default agent from `/opencode:setup --default-agent` if one is configured.
 - `--free` and `--model` are mutually exclusive — the bridge rejects payloads that include both. If the user supplies both, return the bridge's error verbatim and stop.
 
 Resume detection (runs before the final bridged call, only when neither `--resume` nor `--fresh` is in the raw user request):

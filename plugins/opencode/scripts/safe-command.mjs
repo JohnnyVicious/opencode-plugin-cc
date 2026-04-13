@@ -194,12 +194,21 @@ function parseSetupArgs(text) {
       out.push(token);
       continue;
     }
-    if (token === "--review-gate-max" || token === "--review-gate-cooldown") {
+    if (
+      token === "--review-gate-max" ||
+      token === "--review-gate-cooldown" ||
+      token === "--default-model" ||
+      token === "--default-agent"
+    ) {
       const value = tokens[++i];
       if (value == null) {
         throw new Error(`${token} requires a value.`);
       }
-      if (value !== "off" && !/^[1-9][0-9]*$/.test(value)) {
+      if (
+        (token === "--review-gate-max" || token === "--review-gate-cooldown") &&
+        value !== "off" &&
+        !/^[1-9][0-9]*$/.test(value)
+      ) {
         throw new Error(`${token} must be a positive integer or "off".`);
       }
       out.push(token, value);
