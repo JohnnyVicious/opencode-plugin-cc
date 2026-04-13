@@ -99,7 +99,7 @@ To check your configured providers:
 
 - `/opencode:review` -- Normal OpenCode code review (read-only). Supports `--base <ref>`, `--pr <number>`, `--model <provider/model>`, `--free`, `--wait`, and `--background`.
 - `/opencode:adversarial-review` -- Steerable review that challenges implementation and design decisions. Supports `--base <ref>`, `--pr <number>`, `--model <provider/model>`, `--free`, `--wait`, `--background`, and custom focus text.
-- `/opencode:rescue` -- Delegates a task to OpenCode via a direct call to the companion's `task` runtime. Supports `--model`, `--free`, `--agent`, `--resume`, `--fresh`, `--worktree`, and `--background`. Foreground is the default; `--background` detaches a worker and returns a job id you can poll with `/opencode:status`.
+- `/opencode:rescue` -- Delegates a task to OpenCode via the `safe-command.mjs` bridge, which validates flags and feeds the task text through a shell-insulated heredoc. Supports `--model`, `--free`, `--agent`, `--resume`, `--fresh`, `--worktree`, `--wait`, and `--background`. Foreground is the default; `--wait` is an explicit no-op alias for foreground; `--background` detaches a worker and returns a job id you can poll with `/opencode:status`.
 - `/opencode:status` -- Shows running/recent OpenCode jobs for the current repo.
 - `/opencode:result` -- Shows final output for a finished job, including OpenCode session ID for resuming.
 - `/opencode:cancel` -- Cancels an active OpenCode job.
