@@ -24,7 +24,8 @@ import os from "node:os";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { platformShellOption } from "./process.mjs";
+import { platformShellOption, isProcessAlive as isProcessAliveWithToken } from "./process.mjs";
+import { loadState } from "./state.mjs";
 
 const DEFAULT_PORT = 4096;
 const DEFAULT_HOST = "127.0.0.1";
@@ -330,16 +331,17 @@ export async function connect(opts = {}) {
 /**
  * Reap the plugin-spawned OpenCode server on SessionEnd.
  *
- * Only kills what we started (tracked via server.json `lastServerPid`).
- * Guards against killing a server the user started independently by
- * re-checking isServerRunning after the kill attempt — if something
- * else owns the port, leave it alone.
+ * Only kills what we started (tracked via server.json `lastServerPid`),
+ * and only when the plugin has no in-flight tracked-jobs. The previous
+ * implementation gated solely on `now - startedAt > 5 min`, which would
+ * SIGTERM the OpenCode server out from under an actively-streaming
+ * `sendPrompt` call if a SessionEnd happened to fire during a long
+ * rescue or review. Callers would see the socket drop as `terminated`
+ * with no timeout error in our own code path.
  *
- * Defense-in-depth: if the server has been running longer than
- * SERVER_REAP_IDLE_TIMEOUT (5 min) without a successful health check
- * from a plugin client, it is also considered orphanable even if the
- * PID is still alive (user may have killed the Claude session while the
- * server sat idle).
+ * The guard is now two conditions:
+ *   1. server uptime is above SERVER_REAP_IDLE_TIMEOUT, and
+ *   2. no tracked job is in `running` state with a live companion PID.
  *
  * @param {string} workspacePath
  * @param {{ port?: number, host?: string }} [opts]
@@ -360,8 +362,14 @@ export async function reapServerIfOurs(workspacePath, opts = {}) {
     return false;
   }
 
-  const idleMs = startedAt ? Date.now() - startedAt : Infinity;
-  if (idleMs < SERVER_REAP_IDLE_TIMEOUT) return false;
+  const uptimeMs = startedAt ? Date.now() - startedAt : Infinity;
+  if (uptimeMs < SERVER_REAP_IDLE_TIMEOUT) return false;
+
+  // Do not kill the server if any tracked job is still running against
+  // it. Orphaned `running` jobs (process crashed without marking failed)
+  // are filtered out via the shared token-aware liveness check, so a
+  // stale state entry cannot permanently block reaping.
+  if (hasInFlightTrackedJob(workspacePath)) return false;
 
   try {
     process.kill(pid, "SIGTERM");
@@ -377,5 +385,32 @@ export async function reapServerIfOurs(workspacePath, opts = {}) {
     return true;
   }
 
+  return false;
+}
+
+/**
+ * Returns true if any tracked job is in `running` state with a
+ * companion PID that is still alive. Stale `running` entries from a
+ * crashed companion are treated as not-in-flight so the reaper can make
+ * progress.
+ * @param {string} workspacePath
+ * @returns {boolean}
+ */
+function hasInFlightTrackedJob(workspacePath) {
+  let jobsState;
+  try {
+    jobsState = loadState(workspacePath);
+  } catch {
+    // If the job state file is unreadable, fail safe: assume in-flight
+    // work may exist and keep the server alive. The next SessionEnd
+    // will retry.
+    return true;
+  }
+  const jobs = Array.isArray(jobsState?.jobs) ? jobsState.jobs : [];
+  for (const job of jobs) {
+    if (job?.status !== "running") continue;
+    if (!job.pid) continue;
+    if (isProcessAliveWithToken(job.pid, job.pidStartToken)) return true;
+  }
   return false;
 }

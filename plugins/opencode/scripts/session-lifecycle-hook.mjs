@@ -22,14 +22,11 @@ async function main() {
   }
 
   if (event === "SessionEnd") {
-    // Reap the plugin-spawned OpenCode server (if idle > 5 min).
-    try {
-      await reapServerIfOurs(workspace);
-    } catch {
-      // best-effort
-    }
-
-    // Clean up: check for any orphaned running jobs and mark them as failed
+    // Clean up orphaned running jobs first. This has to run before
+    // reapServerIfOurs because the reaper now checks for in-flight
+    // tracked jobs before killing the server, and stale `running`
+    // entries from a crashed companion would otherwise keep the server
+    // alive forever.
     const state = loadState(workspace);
     const runningJobs = (state.jobs ?? []).filter((j) => j.status === "running");
 
@@ -49,6 +46,14 @@ async function main() {
           });
         }
       }
+    }
+
+    // Then reap the plugin-spawned OpenCode server (if uptime > 5 min
+    // AND no in-flight tracked jobs are running against it).
+    try {
+      await reapServerIfOurs(workspace);
+    } catch {
+      // best-effort
     }
   }
 }
