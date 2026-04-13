@@ -300,7 +300,8 @@ async function resolveRequestedModel(options) {
 
 async function handleReview(argv) {
   const { options } = parseArgs(argv, {
-    valueOptions: ["base", "scope", "model", "pr"],
+    valueOptions: ["base", "scope", "model", "pr", "path"],
+    multiValueOptions: ["path"],
     booleanOptions: ["wait", "background", "free"],
   });
 
@@ -309,6 +310,9 @@ async function handleReview(argv) {
     console.error(`Invalid --pr value: ${options.pr} (must be a positive number)`);
     process.exit(1);
   }
+
+  const paths = normalizePathOption(options.path);
+  const effectivePrNumber = paths?.length ? null : prNumber;
 
   const workspace = await resolveWorkspace();
   const state = loadState(workspace);
@@ -326,7 +330,8 @@ async function handleReview(argv) {
   const job = createJobRecord(workspace, "review", {
     base: options.base,
     model: requestedModel?.raw ?? modelOptions.model,
-    pr: prNumber,
+    pr: effectivePrNumber,
+    paths,
   });
 
   try {
@@ -340,7 +345,8 @@ async function handleReview(argv) {
 
       const prompt = await buildReviewPrompt(workspace, {
         base: options.base,
-        pr: prNumber,
+        pr: effectivePrNumber,
+        paths,
         adversarial: false,
       }, PLUGIN_ROOT);
 
@@ -348,7 +354,7 @@ async function handleReview(argv) {
       const modelLabel = requestedModel?.raw ?? null;
 
       report("reviewing", "Running review...");
-      log(`Prompt length: ${prompt.length} chars, agent: ${reviewAgent.agent}${modelLabel ? `, model: ${modelLabel}${options.free ? " (--free picked)" : ""}` : ""}${prNumber ? `, pr: #${prNumber}` : ""}`);
+      log(`Prompt length: ${prompt.length} chars, agent: ${reviewAgent.agent}${modelLabel ? `, model: ${modelLabel}${options.free ? " (--free picked)" : ""}` : ""}${effectivePrNumber ? `, pr: #${effectivePrNumber}` : ""}${paths?.length ? `, paths: ${paths.join(", ")}` : ""}`);
 
       const response = await client.sendPrompt(session.id, prompt, {
         agent: reviewAgent.agent,
@@ -381,7 +387,8 @@ async function handleReview(argv) {
 
 async function handleAdversarialReview(argv) {
   const { options, positional } = parseArgs(argv, {
-    valueOptions: ["base", "scope", "model", "pr"],
+    valueOptions: ["base", "scope", "model", "pr", "path"],
+    multiValueOptions: ["path"],
     booleanOptions: ["wait", "background", "free"],
   });
 
@@ -418,11 +425,15 @@ async function handleAdversarialReview(argv) {
     }
   }
 
+  const paths = normalizePathOption(options.path);
+  const effectivePrNumber = paths?.length ? null : prNumber;
+
   const job = createJobRecord(workspace, "adversarial-review", {
     base: options.base,
     focus,
     model: requestedModel?.raw ?? modelOptions.model,
-    pr: prNumber,
+    pr: effectivePrNumber,
+    paths,
   });
 
   try {
@@ -436,7 +447,8 @@ async function handleAdversarialReview(argv) {
 
       const prompt = await buildReviewPrompt(workspace, {
         base: options.base,
-        pr: prNumber,
+        pr: effectivePrNumber,
+        paths,
         adversarial: true,
         focus,
       }, PLUGIN_ROOT);
@@ -445,7 +457,7 @@ async function handleAdversarialReview(argv) {
       const modelLabel = requestedModel?.raw ?? null;
 
       report("reviewing", "Running adversarial review...");
-      log(`Prompt length: ${prompt.length} chars, agent: ${reviewAgent.agent}, focus: ${focus || "(none)"}${modelLabel ? `, model: ${modelLabel}${options.free ? " (--free picked)" : ""}` : ""}${prNumber ? `, pr: #${prNumber}` : ""}`);
+      log(`Prompt length: ${prompt.length} chars, agent: ${reviewAgent.agent}, focus: ${focus || "(none)"}${modelLabel ? `, model: ${modelLabel}${options.free ? " (--free picked)" : ""}` : ""}${effectivePrNumber ? `, pr: #${effectivePrNumber}` : ""}${paths?.length ? `, paths: ${paths.join(", ")}` : ""}`);
 
       const response = await client.sendPrompt(session.id, prompt, {
         agent: reviewAgent.agent,
@@ -1147,6 +1159,23 @@ async function handleLastReview(argv) {
 // ------------------------------------------------------------------
 // Helpers
 // ------------------------------------------------------------------
+
+/**
+ * Normalize path option to always return an array.
+ * Handles both `--path src --path lib` (array) and `--path src,lib` (comma-separated string).
+ * @param {string|string[]|undefined} pathOption
+ * @returns {string[]|null}
+ */
+function normalizePathOption(pathOption) {
+  if (!pathOption) return null;
+  if (Array.isArray(pathOption)) {
+    return pathOption.flatMap((p) => p.split(",")).map((p) => p.trim()).filter(Boolean);
+  }
+  if (typeof pathOption === "string") {
+    return pathOption.split(",").map((p) => p.trim()).filter(Boolean);
+  }
+  return null;
+}
 
 /**
  * Extract text from an OpenCode API response.
