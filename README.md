@@ -99,7 +99,7 @@ To check your configured providers:
 
 - `/opencode:review` -- Normal OpenCode code review (read-only). Supports `--base <ref>`, `--pr <number>`, `--model <provider/model>`, `--free`, `--wait`, and `--background`.
 - `/opencode:adversarial-review` -- Steerable review that challenges implementation and design decisions. Supports `--base <ref>`, `--pr <number>`, `--model <provider/model>`, `--free`, `--wait`, `--background`, and custom focus text.
-- `/opencode:rescue` -- Delegates a task to OpenCode via the `opencode:opencode-rescue` subagent. Supports `--model`, `--free`, `--agent`, `--resume`, `--fresh`, `--worktree`, `--wait`, and `--background`.
+- `/opencode:rescue` -- Delegates a task to OpenCode via a direct call to the companion's `task` runtime. Supports `--model`, `--free`, `--agent`, `--resume`, `--fresh`, `--worktree`, and `--background`. Foreground is the default; `--background` detaches a worker and returns a job id you can poll with `/opencode:status`.
 - `/opencode:status` -- Shows running/recent OpenCode jobs for the current repo.
 - `/opencode:result` -- Shows final output for a finished job, including OpenCode session ID for resuming.
 - `/opencode:cancel` -- Cancels an active OpenCode job.
@@ -185,7 +185,6 @@ opencode-plugin-cc/
 ├── .github/workflows/ci.yml              # GitHub Actions CI
 ├── plugins/opencode/
 │   ├── .claude-plugin/plugin.json        # Plugin metadata
-│   ├── agents/opencode-rescue.md         # Rescue subagent definition
 │   ├── commands/                         # 7 slash commands
 │   │   ├── review.md
 │   │   ├── adversarial-review.md
