@@ -99,7 +99,7 @@ To check your configured providers:
 
 - `/opencode:review` -- Normal OpenCode code review (read-only). Supports `--base <ref>`, `--pr <number>`, `--model <provider/model>`, `--free`, `--wait`, and `--background`. Uses the saved default model when configured and no runtime model flag is supplied.
 - `/opencode:adversarial-review` -- Steerable review that challenges implementation and design decisions. Supports `--base <ref>`, `--pr <number>`, `--model <provider/model>`, `--free`, `--wait`, `--background`, and custom focus text. Uses the saved default model when configured and no runtime model flag is supplied.
-- `/opencode:rescue` -- Delegates a task to OpenCode via the `opencode:opencode-rescue` subagent. Supports `--model`, `--free`, `--agent`, `--resume`, `--fresh`, `--worktree`, `--wait`, and `--background`. Uses saved default model/agent values when configured and no runtime flag is supplied.
+- `/opencode:rescue` -- Delegates a task to OpenCode via the `safe-command.mjs` bridge, which validates flags and feeds the task text through a shell-insulated heredoc. Supports `--model`, `--free`, `--agent`, `--resume`, `--fresh`, `--worktree`, `--wait`, and `--background`. Foreground is the default; `--wait` is an explicit no-op alias for foreground; `--background` detaches a worker and returns a job id you can poll with `/opencode:status`. Uses saved default model/agent values when configured and no runtime flag is supplied.
 - `/opencode:status` -- Shows running/recent OpenCode jobs for the current repo.
 - `/opencode:result` -- Shows final output for a finished job, including OpenCode session ID for resuming.
 - `/opencode:cancel` -- Cancels an active OpenCode job.
@@ -198,7 +198,6 @@ opencode-plugin-cc/
 ├── .github/workflows/ci.yml              # GitHub Actions CI
 ├── plugins/opencode/
 │   ├── .claude-plugin/plugin.json        # Plugin metadata
-│   ├── agents/opencode-rescue.md         # Rescue subagent definition
 │   ├── commands/                         # 7 slash commands
 │   │   ├── review.md
 │   │   ├── adversarial-review.md
