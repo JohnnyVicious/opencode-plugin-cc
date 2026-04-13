@@ -57,10 +57,22 @@ describe("renderReview", () => {
 
 describe("renderSetup", () => {
   it("renders installed status", () => {
-    const output = renderSetup({ installed: true, version: "1.3.9", serverRunning: true, providers: ["anthropic"], reviewGate: false });
+    const output = renderSetup({
+      installed: true,
+      version: "1.3.9",
+      serverRunning: true,
+      providers: ["anthropic"],
+      defaults: {
+        model: "anthropic/claude-opus-4-6",
+        agent: "build",
+      },
+      reviewGate: false,
+    });
     assert.ok(output.includes("Yes"));
     assert.ok(output.includes("1.3.9"));
     assert.ok(output.includes("anthropic"));
+    assert.ok(output.includes("anthropic/claude-opus-4-6"));
+    assert.ok(output.includes("build"));
   });
 
   it("renders not installed status", () => {

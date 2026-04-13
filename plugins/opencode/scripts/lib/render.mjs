@@ -207,6 +207,10 @@ export function renderSetup(status) {
   } else if (status.installed) {
     lines.push(`- **Providers**: None configured. Run \`!opencode providers\` to set up.`);
   }
+  if (status.defaults) {
+    lines.push(`- **Default Model**: ${status.defaults.model ? `\`${status.defaults.model}\`` : "Unset"}`);
+    lines.push(`- **Default Agent**: ${status.defaults.agent ? `\`${status.defaults.agent}\`` : "Unset"}`);
+  }
   if (status.reviewGate !== undefined) {
     const parts = [status.reviewGate ? "Enabled" : "Disabled"];
     if (status.reviewGateMaxPerSession != null) {

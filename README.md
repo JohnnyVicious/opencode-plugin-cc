@@ -93,17 +93,30 @@ To check your configured providers:
 | `/codex:status` | `/opencode:status` | Show running/recent jobs |
 | `/codex:result` | `/opencode:result` | Show finished job output |
 | `/codex:cancel` | `/opencode:cancel` | Cancel active background job |
-| `/codex:setup` | `/opencode:setup` | Check install/auth, toggle review gate |
+| `/codex:setup` | `/opencode:setup` | Check install/auth, configure defaults, toggle review gate |
 
 ## Slash Commands
 
-- `/opencode:review` -- Normal OpenCode code review (read-only). Supports `--base <ref>`, `--pr <number>`, `--model <provider/model>`, `--free`, `--wait`, and `--background`.
-- `/opencode:adversarial-review` -- Steerable review that challenges implementation and design decisions. Supports `--base <ref>`, `--pr <number>`, `--model <provider/model>`, `--free`, `--wait`, `--background`, and custom focus text.
-- `/opencode:rescue` -- Delegates a task to OpenCode via the `safe-command.mjs` bridge, which validates flags and feeds the task text through a shell-insulated heredoc. Supports `--model`, `--free`, `--agent`, `--resume`, `--fresh`, `--worktree`, `--wait`, and `--background`. Foreground is the default; `--wait` is an explicit no-op alias for foreground; `--background` detaches a worker and returns a job id you can poll with `/opencode:status`.
+- `/opencode:review` -- Normal OpenCode code review (read-only). Supports `--base <ref>`, `--pr <number>`, `--model <provider/model>`, `--free`, `--wait`, and `--background`. Uses the saved default model when configured and no runtime model flag is supplied.
+- `/opencode:adversarial-review` -- Steerable review that challenges implementation and design decisions. Supports `--base <ref>`, `--pr <number>`, `--model <provider/model>`, `--free`, `--wait`, `--background`, and custom focus text. Uses the saved default model when configured and no runtime model flag is supplied.
+- `/opencode:rescue` -- Delegates a task to OpenCode via the `safe-command.mjs` bridge, which validates flags and feeds the task text through a shell-insulated heredoc. Supports `--model`, `--free`, `--agent`, `--resume`, `--fresh`, `--worktree`, `--wait`, and `--background`. Foreground is the default; `--wait` is an explicit no-op alias for foreground; `--background` detaches a worker and returns a job id you can poll with `/opencode:status`. Uses saved default model/agent values when configured and no runtime flag is supplied.
 - `/opencode:status` -- Shows running/recent OpenCode jobs for the current repo.
 - `/opencode:result` -- Shows final output for a finished job, including OpenCode session ID for resuming.
 - `/opencode:cancel` -- Cancels an active OpenCode job.
-- `/opencode:setup` -- Checks OpenCode install/auth, can enable/disable the review gate hook, and can configure review-gate throttles.
+- `/opencode:setup` -- Checks OpenCode install/auth, can configure default model/agent values, can enable/disable the review gate hook, and can configure review-gate throttles.
+
+## Command Defaults
+
+Persist model and rescue-agent defaults with setup:
+
+```
+/opencode:setup --default-model anthropic/claude-opus-4-6 --default-agent build
+/opencode:setup --default-model off
+/opencode:setup --default-agent off
+```
+
+- `--default-model <provider/model>` applies to `/opencode:review`, `/opencode:adversarial-review`, and `/opencode:rescue` unless a command includes `--model` or `--free`.
+- `--default-agent <build|plan>` applies to `/opencode:rescue` unless the command includes `--agent`. Review commands keep using the bundled read-only review agent.
 
 ## Review Gate
 
