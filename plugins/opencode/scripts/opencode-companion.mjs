@@ -259,6 +259,7 @@ async function resolveRequestedModel(options) {
 async function handleReview(argv) {
   const { options } = parseArgs(argv, {
     valueOptions: ["base", "scope", "model", "pr", "path"],
+    multiValueOptions: ["path"],
     booleanOptions: ["wait", "background", "free"],
   });
 
@@ -269,6 +270,7 @@ async function handleReview(argv) {
   }
 
   const paths = normalizePathOption(options.path);
+  const effectivePrNumber = paths?.length ? null : prNumber;
 
   let requestedModel;
   try {
@@ -282,7 +284,7 @@ async function handleReview(argv) {
   const job = createJobRecord(workspace, "review", {
     base: options.base,
     model: options.model,
-    pr: prNumber,
+    pr: effectivePrNumber,
     paths,
   });
 
@@ -297,7 +299,7 @@ async function handleReview(argv) {
 
       const prompt = await buildReviewPrompt(workspace, {
         base: options.base,
-        pr: prNumber,
+        pr: effectivePrNumber,
         paths,
         adversarial: false,
       }, PLUGIN_ROOT);
@@ -306,7 +308,7 @@ async function handleReview(argv) {
       const modelLabel = requestedModel?.raw ?? requestedModel ?? null;
 
       report("reviewing", "Running review...");
-      log(`Prompt length: ${prompt.length} chars, agent: ${reviewAgent.agent}${modelLabel ? `, model: ${modelLabel}${options.free ? " (--free picked)" : ""}` : ""}${prNumber ? `, pr: #${prNumber}` : ""}${paths?.length ? `, paths: ${paths.join(", ")}` : ""}`);
+      log(`Prompt length: ${prompt.length} chars, agent: ${reviewAgent.agent}${modelLabel ? `, model: ${modelLabel}${options.free ? " (--free picked)" : ""}` : ""}${effectivePrNumber ? `, pr: #${effectivePrNumber}` : ""}${paths?.length ? `, paths: ${paths.join(", ")}` : ""}`);
 
       const response = await client.sendPrompt(session.id, prompt, {
         agent: reviewAgent.agent,
@@ -340,6 +342,7 @@ async function handleReview(argv) {
 async function handleAdversarialReview(argv) {
   const { options, positional } = parseArgs(argv, {
     valueOptions: ["base", "scope", "model", "pr", "path"],
+    multiValueOptions: ["path"],
     booleanOptions: ["wait", "background", "free"],
   });
 
@@ -372,13 +375,14 @@ async function handleAdversarialReview(argv) {
   }
 
   const paths = normalizePathOption(options.path);
+  const effectivePrNumber = paths?.length ? null : prNumber;
 
   const workspace = await resolveWorkspace();
   const job = createJobRecord(workspace, "adversarial-review", {
     base: options.base,
     focus,
     model: options.model,
-    pr: prNumber,
+    pr: effectivePrNumber,
     paths,
   });
 
@@ -393,7 +397,7 @@ async function handleAdversarialReview(argv) {
 
       const prompt = await buildReviewPrompt(workspace, {
         base: options.base,
-        pr: prNumber,
+        pr: effectivePrNumber,
         paths,
         adversarial: true,
         focus,
@@ -403,7 +407,7 @@ async function handleAdversarialReview(argv) {
       const modelLabel = requestedModel?.raw ?? null;
 
       report("reviewing", "Running adversarial review...");
-      log(`Prompt length: ${prompt.length} chars, agent: ${reviewAgent.agent}, focus: ${focus || "(none)"}${modelLabel ? `, model: ${modelLabel}${options.free ? " (--free picked)" : ""}` : ""}${prNumber ? `, pr: #${prNumber}` : ""}${paths?.length ? `, paths: ${paths.join(", ")}` : ""}`);
+      log(`Prompt length: ${prompt.length} chars, agent: ${reviewAgent.agent}, focus: ${focus || "(none)"}${modelLabel ? `, model: ${modelLabel}${options.free ? " (--free picked)" : ""}` : ""}${effectivePrNumber ? `, pr: #${effectivePrNumber}` : ""}${paths?.length ? `, paths: ${paths.join(", ")}` : ""}`);
 
       const response = await client.sendPrompt(session.id, prompt, {
         agent: reviewAgent.agent,
@@ -1110,10 +1114,10 @@ async function handleLastReview(argv) {
 function normalizePathOption(pathOption) {
   if (!pathOption) return null;
   if (Array.isArray(pathOption)) {
-    return pathOption.flatMap((p) => p.split(",")).filter(Boolean);
+    return pathOption.flatMap((p) => p.split(",")).map((p) => p.trim()).filter(Boolean);
   }
   if (typeof pathOption === "string") {
-    return pathOption.split(",").filter(Boolean);
+    return pathOption.split(",").map((p) => p.trim()).filter(Boolean);
   }
   return null;
 }

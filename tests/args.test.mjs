@@ -35,6 +35,15 @@ describe("parseArgs", () => {
     assert.equal(options.write, true);
     assert.deepEqual(positional, ["fix", "the", "bug"]);
   });
+
+  it("accumulates repeated multi-value options", () => {
+    const { options } = parseArgs(
+      ["--path", "src", "--path", "lib", "--model", "anthropic/claude"],
+      { valueOptions: ["path", "model"], multiValueOptions: ["path"] }
+    );
+    assert.deepEqual(options.path, ["src", "lib"]);
+    assert.equal(options.model, "anthropic/claude");
+  });
 });
 
 describe("extractTaskText", () => {

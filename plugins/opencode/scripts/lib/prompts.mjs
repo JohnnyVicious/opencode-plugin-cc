@@ -65,14 +65,16 @@ export async function buildReviewPrompt(cwd, opts, pluginRoot) {
   let overByteLimit = false;
   let folderContext = null;
 
-  // Step 1: When --path is specified, collect folder context instead of git diff
-  if (opts.paths && opts.paths.length > 0 && !opts.pr) {
+  // Step 1: When --path is specified, collect path context instead of git diff.
+  // Paths take precedence over PR mode so a command that includes both remains
+  // local and does not require gh/auth.
+  if (opts.paths && opts.paths.length > 0) {
     folderContext = await collectFolderContext(cwd, opts.paths, {
       maxBytes,
       maxFiles,
     });
     changedFiles = folderContext.files;
-    overByteLimit = folderContext.overflowed;
+    overByteLimit = folderContext.overflowedBytes;
     const diffBytes = folderContext.totalBytes;
     const diffIsComplete = !folderContext.overflowed;
     const collectionGuidance = buildCollectionGuidance(diffIsComplete);
@@ -83,8 +85,9 @@ export async function buildReviewPrompt(cwd, opts, pluginRoot) {
       diffIsComplete,
       originalDiffBytes: diffBytes,
       maxInlineDiffBytes: maxBytes,
-      overFileLimit: changedFiles.length > maxFiles,
-      overByteLimit: folderContext.overflowed,
+      maxInlineDiffFiles: maxFiles,
+      overFileLimit: folderContext.overflowedFiles,
+      overByteLimit: folderContext.overflowedBytes,
     });
 
     let systemPrompt;
@@ -286,7 +289,10 @@ function buildFolderContext(folderContext, opts = {}) {
 
   if (opts.overFileLimit || opts.overByteLimit) {
     const reasons = [];
-    if (opts.overFileLimit) reasons.push(`file count ${folderContext.files.length}`);
+    if (opts.overFileLimit) {
+      const max = opts.maxInlineDiffFiles;
+      reasons.push(max ? `file count limit ${max} reached` : "file count limit reached");
+    }
     if (opts.overByteLimit) {
       reasons.push(`content size ${opts.originalDiffBytes} bytes`);
     }

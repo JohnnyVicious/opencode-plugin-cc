@@ -3,11 +3,12 @@
 /**
  * Parse CLI arguments into options and positional args.
  * @param {string[]} argv
- * @param {{ valueOptions?: string[], booleanOptions?: string[] }} schema
+ * @param {{ valueOptions?: string[], booleanOptions?: string[], multiValueOptions?: string[] }} schema
  * @returns {{ options: Record<string, string|boolean>, positional: string[] }}
  */
 export function parseArgs(argv, schema = {}) {
   const valueSet = new Set(schema.valueOptions ?? []);
+  const multiValueSet = new Set(schema.multiValueOptions ?? []);
   const boolSet = new Set(schema.booleanOptions ?? []);
   const options = {};
   const positional = [];
@@ -20,7 +21,18 @@ export function parseArgs(argv, schema = {}) {
     }
     const key = arg.slice(2);
     if (valueSet.has(key)) {
-      options[key] = argv[++i] ?? "";
+      const value = argv[++i] ?? "";
+      if (multiValueSet.has(key)) {
+        if (options[key] === undefined) {
+          options[key] = [value];
+        } else if (Array.isArray(options[key])) {
+          options[key].push(value);
+        } else {
+          options[key] = [options[key], value];
+        }
+      } else {
+        options[key] = value;
+      }
     } else if (boolSet.has(key) || !valueSet.has(key)) {
       options[key] = true;
     }
