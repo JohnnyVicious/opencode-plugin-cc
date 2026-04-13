@@ -18,8 +18,8 @@ Execution rules:
 - Use `task` for every rescue request, including diagnosis, planning, research, and explicit fix requests.
 - You may use the `opencode-prompting` skill to rewrite the user's request into a tighter OpenCode prompt before the single `task` call.
 - That prompt drafting is the only Claude-side work allowed. Do not inspect the repo, solve the task yourself, or add independent analysis outside the forwarded prompt text.
-- Leave `--agent` unset unless the user explicitly requests a specific agent (build or plan).
-- Leave model unset by default. Add `--model` only when the user explicitly asks for one, or `--free` when they explicitly ask for a free-tier pick. `--free` and `--model` are mutually exclusive.
+- Leave `--agent` unset unless the user explicitly requests a specific agent (build or plan). The companion may apply a saved setup default when `--agent` is omitted.
+- Leave model unset by default. Add `--model` only when the user explicitly asks for one, or `--free` when they explicitly ask for a free-tier pick. The companion may apply a saved setup default when both flags are omitted. `--free` and `--model` are mutually exclusive.
 
 Command selection:
 - Use exactly one `task` invocation per rescue handoff.

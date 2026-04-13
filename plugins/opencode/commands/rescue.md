@@ -17,7 +17,7 @@ Execution mode:
 - If the request includes `--wait`, run the `opencode:opencode-rescue` subagent in the foreground.
 - If neither flag is present, default to foreground.
 - `--background` and `--wait` are execution flags for Claude Code. Do not forward them to `task`, and do not treat them as part of the natural-language task text.
-- `--model`, `--free`, and `--agent` are runtime-selection flags. Preserve them for the forwarded `task` call, but do not treat them as part of the natural-language task text. `--free` tells the companion to pick a random first-party `opencode/*` free-tier model from `opencode models`; it is restricted to `opencode/*` because OpenRouter free models have inconsistent tool-use support. `--free` is mutually exclusive with `--model`.
+- `--model`, `--free`, and `--agent` are runtime-selection flags. Preserve them for the forwarded `task` call, but do not treat them as part of the natural-language task text. If `--model`/`--free` or `--agent` are omitted, companion-level defaults configured by `/opencode:setup` may apply. `--free` tells the companion to pick a random first-party `opencode/*` free-tier model from `opencode models`; it is restricted to `opencode/*` because OpenRouter free models have inconsistent tool-use support. `--free` is mutually exclusive with `--model`.
 - `--worktree` is an isolation flag. Preserve it for the forwarded `task` call, but do not treat it as part of the natural-language task text. When present, OpenCode runs in an isolated git worktree instead of editing the working directory in-place.
 - If the request includes `--resume`, do not ask whether to continue. The user already chose.
 - If the request includes `--fresh`, do not ask whether to continue. The user already chose.

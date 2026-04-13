@@ -84,6 +84,14 @@ import {
 import { readJson, readDenyRules } from "./lib/fs.mjs";
 import { resolveReviewAgent } from "./lib/review-agent.mjs";
 import { parseModelString, selectFreeModel } from "./lib/model.mjs";
+import {
+  applyDefaultModelOptions,
+  hasOwnOption,
+  normalizeDefaults,
+  parseDefaultAgentSetting,
+  parseDefaultModelSetting,
+  resolveTaskAgentName,
+} from "./lib/defaults.mjs";
 
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(import.meta.dirname, "..");
 
@@ -125,7 +133,7 @@ handler(argv).catch((err) => {
 
 async function handleSetup(argv) {
   const { options } = parseArgs(argv, {
-    valueOptions: ["review-gate-max", "review-gate-cooldown"],
+    valueOptions: ["review-gate-max", "review-gate-cooldown", "default-model", "default-agent"],
     booleanOptions: ["json", "enable-review-gate", "disable-review-gate"],
   });
 
@@ -155,6 +163,26 @@ async function handleSetup(argv) {
     reviewGateCooldownMinutesOverride = cooldown;
   }
 
+  let defaultModelOverride;
+  if (hasOwnOption(options, "default-model")) {
+    try {
+      defaultModelOverride = parseDefaultModelSetting(options["default-model"]);
+    } catch (err) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  }
+
+  let defaultAgentOverride;
+  if (hasOwnOption(options, "default-agent")) {
+    try {
+      defaultAgentOverride = parseDefaultAgentSetting(options["default-agent"]);
+    } catch (err) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  }
+
   const installed = await isOpencodeInstalled();
   const version = installed ? await getOpencodeVersion() : null;
 
@@ -182,7 +210,9 @@ async function handleSetup(argv) {
   if (
     reviewGateOverride !== undefined ||
     reviewGateMaxPerSessionOverride !== undefined ||
-    reviewGateCooldownMinutesOverride !== undefined
+    reviewGateCooldownMinutesOverride !== undefined ||
+    defaultModelOverride !== undefined ||
+    defaultAgentOverride !== undefined
   ) {
     updateState(workspace, (state) => {
       state.config = state.config || {};
@@ -195,6 +225,15 @@ async function handleSetup(argv) {
       if (reviewGateCooldownMinutesOverride !== undefined) {
         state.config.reviewGateCooldownMinutes = reviewGateCooldownMinutesOverride;
       }
+      if (defaultModelOverride !== undefined || defaultAgentOverride !== undefined) {
+        state.config.defaults = state.config.defaults || {};
+      }
+      if (defaultModelOverride !== undefined) {
+        state.config.defaults.model = defaultModelOverride;
+      }
+      if (defaultAgentOverride !== undefined) {
+        state.config.defaults.agent = defaultAgentOverride;
+      }
     });
   }
 
@@ -202,12 +241,14 @@ async function handleSetup(argv) {
   const reviewGate = finalState.config?.reviewGate ?? false;
   const reviewGateMaxPerSession = finalState.config?.reviewGateMaxPerSession ?? null;
   const reviewGateCooldownMinutes = finalState.config?.reviewGateCooldownMinutes ?? null;
+  const defaults = normalizeDefaults(finalState.config?.defaults);
 
   const status = {
     installed,
     version,
     serverRunning,
     providers,
+    defaults,
     reviewGate,
     reviewGateMaxPerSession,
     reviewGateCooldownMinutes,
@@ -237,13 +278,14 @@ async function handleSetup(argv) {
  * @returns {Promise<{providerID: string, modelID: string, raw?: string} | null>}
  */
 async function resolveRequestedModel(options) {
-  if (options.free && options.model) {
+  const hasModel = hasOwnOption(options, "model");
+  if (options.free && hasModel) {
     throw new Error("--free and --model are mutually exclusive; pick one.");
   }
   if (options.free) {
     return selectFreeModel();
   }
-  if (options.model) {
+  if (hasModel) {
     const parsed = parseModelString(options.model);
     if (!parsed) {
       throw new Error(
@@ -251,7 +293,7 @@ async function resolveRequestedModel(options) {
         `e.g. openrouter/anthropic/claude-haiku-4.5)`
       );
     }
-    return { ...parsed, raw: options.model };
+    return { ...parsed, raw: options.model.trim() };
   }
   return null;
 }
@@ -268,18 +310,22 @@ async function handleReview(argv) {
     process.exit(1);
   }
 
+  const workspace = await resolveWorkspace();
+  const state = loadState(workspace);
+  const defaults = normalizeDefaults(state.config?.defaults);
+  const modelOptions = applyDefaultModelOptions(options, defaults);
+
   let requestedModel;
   try {
-    requestedModel = await resolveRequestedModel(options);
+    requestedModel = await resolveRequestedModel(modelOptions);
   } catch (err) {
     console.error(err.message);
     process.exit(1);
   }
 
-  const workspace = await resolveWorkspace();
   const job = createJobRecord(workspace, "review", {
     base: options.base,
-    model: options.model,
+    model: requestedModel?.raw ?? modelOptions.model,
     pr: prNumber,
   });
 
@@ -299,7 +345,7 @@ async function handleReview(argv) {
       }, PLUGIN_ROOT);
 
       const reviewAgent = await resolveReviewAgent(client, log);
-      const modelLabel = requestedModel?.raw ?? requestedModel ?? null;
+      const modelLabel = requestedModel?.raw ?? null;
 
       report("reviewing", "Running review...");
       log(`Prompt length: ${prompt.length} chars, agent: ${reviewAgent.agent}${modelLabel ? `, model: ${modelLabel}${options.free ? " (--free picked)" : ""}` : ""}${prNumber ? `, pr: #${prNumber}` : ""}`);
@@ -339,9 +385,14 @@ async function handleAdversarialReview(argv) {
     booleanOptions: ["wait", "background", "free"],
   });
 
+  const workspace = await resolveWorkspace();
+  const state = loadState(workspace);
+  const defaults = normalizeDefaults(state.config?.defaults);
+  const modelOptions = applyDefaultModelOptions(options, defaults);
+
   let requestedModel;
   try {
-    requestedModel = await resolveRequestedModel(options);
+    requestedModel = await resolveRequestedModel(modelOptions);
   } catch (err) {
     console.error(err.message);
     process.exit(1);
@@ -367,11 +418,10 @@ async function handleAdversarialReview(argv) {
     }
   }
 
-  const workspace = await resolveWorkspace();
   const job = createJobRecord(workspace, "adversarial-review", {
     base: options.base,
     focus,
-    model: options.model,
+    model: requestedModel?.raw ?? modelOptions.model,
     pr: prNumber,
   });
 
@@ -444,20 +494,24 @@ async function handleTask(argv) {
     process.exit(1);
   }
 
+  const workspace = await resolveWorkspace();
+  const state = loadState(workspace);
+  const defaults = normalizeDefaults(state.config?.defaults);
+  const modelOptions = applyDefaultModelOptions(options, defaults);
+
   // Resolve --free / --model once here so background workers inherit a
   // concrete model string and can't drift if `opencode models` changes
   // between dispatch and execution.
   let requestedModel;
   try {
-    requestedModel = await resolveRequestedModel(options);
+    requestedModel = await resolveRequestedModel(modelOptions);
   } catch (err) {
     console.error(err.message);
     process.exit(1);
   }
 
-  const workspace = await resolveWorkspace();
   const isWrite = options.write !== undefined ? options.write : true;
-  const agentName = options.agent ?? (isWrite ? "build" : "plan");
+  const agentName = resolveTaskAgentName(options, defaults, isWrite);
   const useWorktree = Boolean(options.worktree);
 
   if (useWorktree && !isWrite) {
@@ -499,6 +553,7 @@ async function handleTask(argv) {
 
   const job = createJobRecord(workspace, "task", {
     agent: agentName,
+    model: requestedModel?.raw ?? modelOptions.model,
     resumeSessionId,
     worktree: useWorktree,
   });

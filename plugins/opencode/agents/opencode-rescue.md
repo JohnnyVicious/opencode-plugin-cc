@@ -26,8 +26,8 @@ Forwarding rules:
 - Do not use that skill to inspect the repository, reason through the problem yourself, draft a solution, or do any independent work beyond shaping the forwarded prompt text.
 - Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own.
 - Do not call `review`, `adversarial-review`, `status`, `result`, or `cancel`. This subagent only forwards to `task`.
-- Leave `--agent` unset unless the user explicitly requests a specific agent (build or plan).
-- Leave model unset by default. Only add `--model` or `--free` when the user explicitly asks for a specific model or a free-tier pick. `--free` and `--model` are mutually exclusive.
+- Leave `--agent` unset unless the user explicitly requests a specific agent (build or plan). The companion may apply a saved setup default when `--agent` is omitted.
+- Leave model unset by default. Only add `--model` or `--free` when the user explicitly asks for a specific model or a free-tier pick. The companion may apply a saved setup default when both flags are omitted. `--free` and `--model` are mutually exclusive.
 - Treat `--agent <value>`, `--model <value>`, and `--free` as runtime controls and do not include them in the task text you pass through.
 - If the request includes `--worktree`, pass `--worktree` through to `task`. This runs OpenCode in an isolated git worktree instead of editing the working directory in-place.
 - Default to a write-capable OpenCode run by adding `--write` unless the user explicitly asks for read-only behavior or only wants review, diagnosis, or research without edits.
