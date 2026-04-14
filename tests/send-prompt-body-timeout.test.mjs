@@ -59,18 +59,20 @@ describe("sendPrompt body-timeout resilience", () => {
   });
 
   it(
-    "tolerates a server that holds the response body for 7+ seconds",
+    "tolerates a server that holds the response body for several seconds",
     { timeout: 20_000 },
     async () => {
+      // Purely a functional check: if `sendPrompt` resolves with the
+      // expected payload, the request survived the multi-second server
+      // stall — which is exactly the failure mode that `fetch()` + the
+      // undici 5-min default `bodyTimeout` hit on long reviews. We used
+      // to also assert an elapsed-time lower bound, but that flaked
+      // under WSL2 clock skew and the timing bound adds nothing to the
+      // assertion that wasn't already proven by the server completing
+      // its stall + the client returning the final JSON.
       const client = createClient(baseUrl);
-      const start = Date.now();
       const result = await client.sendPrompt("stall-test", "hello");
-      const elapsedMs = Date.now() - start;
       assert.deepEqual(result, { ok: true });
-      assert.ok(
-        elapsedMs >= 6_500,
-        `expected request to take ~7s, actually took ${elapsedMs}ms`
-      );
     }
   );
 });

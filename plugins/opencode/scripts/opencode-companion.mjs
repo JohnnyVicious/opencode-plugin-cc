@@ -83,6 +83,7 @@ import {
 } from "./lib/worktree.mjs";
 import { readJson, readDenyRules } from "./lib/fs.mjs";
 import { resolveReviewAgent } from "./lib/review-agent.mjs";
+import { postReviewToPr } from "./lib/pr-comments.mjs";
 import { parseModelString, selectFreeModel } from "./lib/model.mjs";
 import {
   applyDefaultModelOptions,
@@ -300,9 +301,9 @@ async function resolveRequestedModel(options) {
 
 async function handleReview(argv) {
   const { options } = parseArgs(argv, {
-    valueOptions: ["base", "scope", "model", "pr", "path"],
+    valueOptions: ["base", "scope", "model", "pr", "path", "confidence-threshold"],
     multiValueOptions: ["path"],
-    booleanOptions: ["wait", "background", "free"],
+    booleanOptions: ["wait", "background", "free", "post"],
   });
 
   const prNumber = options.pr ? Number(options.pr) : null;
@@ -313,6 +314,22 @@ async function handleReview(argv) {
 
   const paths = normalizePathOption(options.path);
   const effectivePrNumber = paths?.length ? null : prNumber;
+
+  const postRequested = Boolean(options.post);
+  if (postRequested && !effectivePrNumber) {
+    console.error(
+      "--post requires --pr <number> (posting back to GitHub is PR-only; --path reviews have nowhere to post)."
+    );
+    process.exit(1);
+  }
+
+  let confidenceThreshold;
+  try {
+    confidenceThreshold = parseConfidenceThreshold(options["confidence-threshold"]);
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
 
   const workspace = await resolveWorkspace();
   const state = loadState(workspace);
@@ -379,6 +396,15 @@ async function handleReview(argv) {
 
     saveLastReview(workspace, result.rendered);
     console.log(result.rendered);
+
+    if (postRequested) {
+      await postReviewAndLog(workspace, {
+        prNumber: effectivePrNumber,
+        result,
+        adversarial: false,
+        confidenceThreshold,
+      });
+    }
   } catch (err) {
     console.error(`Review failed: ${err.message}`);
     process.exit(1);
@@ -387,9 +413,9 @@ async function handleReview(argv) {
 
 async function handleAdversarialReview(argv) {
   const { options, positional } = parseArgs(argv, {
-    valueOptions: ["base", "scope", "model", "pr", "path"],
+    valueOptions: ["base", "scope", "model", "pr", "path", "confidence-threshold"],
     multiValueOptions: ["path"],
-    booleanOptions: ["wait", "background", "free"],
+    booleanOptions: ["wait", "background", "free", "post"],
   });
 
   const workspace = await resolveWorkspace();
@@ -427,6 +453,22 @@ async function handleAdversarialReview(argv) {
 
   const paths = normalizePathOption(options.path);
   const effectivePrNumber = paths?.length ? null : prNumber;
+
+  const postRequested = Boolean(options.post);
+  if (postRequested && !effectivePrNumber) {
+    console.error(
+      "--post requires --pr <number> (posting back to GitHub is PR-only; --path reviews have nowhere to post)."
+    );
+    process.exit(1);
+  }
+
+  let confidenceThreshold;
+  try {
+    confidenceThreshold = parseConfidenceThreshold(options["confidence-threshold"]);
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
 
   const job = createJobRecord(workspace, "adversarial-review", {
     base: options.base,
@@ -481,9 +523,80 @@ async function handleAdversarialReview(argv) {
 
     saveLastReview(workspace, result.rendered);
     console.log(result.rendered);
+
+    if (postRequested) {
+      await postReviewAndLog(workspace, {
+        prNumber: effectivePrNumber,
+        result,
+        adversarial: true,
+        confidenceThreshold,
+      });
+    }
   } catch (err) {
     console.error(`Adversarial review failed: ${err.message}`);
     process.exit(1);
+  }
+}
+
+/**
+ * Parse `--confidence-threshold` into a 0..1 float. Accepts raw floats
+ * (`0.8`) or percentage strings (`80`, `80%`). Returns the default 0.8
+ * when the option is unset.
+ */
+function parseConfidenceThreshold(raw) {
+  if (raw == null || raw === "") return 0.8;
+  let text = String(raw).trim();
+  const isPercent = text.endsWith("%");
+  if (isPercent) text = text.slice(0, -1).trim();
+  const n = Number(text);
+  if (!Number.isFinite(n)) {
+    throw new Error(
+      `Invalid --confidence-threshold value: ${raw} (expected a number between 0 and 1, or a percentage like 80)`
+    );
+  }
+  const normalized = isPercent || n > 1 ? n / 100 : n;
+  if (normalized < 0 || normalized > 1) {
+    throw new Error(
+      `Invalid --confidence-threshold value: ${raw} (must be between 0 and 1, or 0 and 100 if expressed as a percentage)`
+    );
+  }
+  return normalized;
+}
+
+/**
+ * Shared post-review publishing path. Never throws — pushes a readable
+ * log line to stderr on both success and failure because the local
+ * review output has already been printed to stdout and the user should
+ * not get a non-zero exit just because GitHub was unhappy.
+ */
+async function postReviewAndLog(workspace, { prNumber, result, adversarial, confidenceThreshold }) {
+  const outcome = await postReviewToPr(workspace, {
+    prNumber,
+    structured: result.structured,
+    rendered: result.rendered,
+    model: result.model,
+    adversarial,
+    confidenceThreshold,
+  });
+
+  if (outcome.posted) {
+    const bits = [`posted review to PR #${prNumber}`];
+    if (outcome.inlineCount > 0) {
+      bits.push(
+        `${outcome.inlineCount} inline comment${outcome.inlineCount === 1 ? "" : "s"}`
+      );
+    }
+    if (outcome.summaryOnlyCount > 0) {
+      bits.push(
+        `${outcome.summaryOnlyCount} summary-only finding${outcome.summaryOnlyCount === 1 ? "" : "s"}`
+      );
+    }
+    const url = outcome.reviewUrl ? ` — ${outcome.reviewUrl}` : "";
+    process.stderr.write(`[opencode-companion] ${bits.join(", ")}${url}\n`);
+  } else {
+    process.stderr.write(
+      `[opencode-companion] Failed to post review to PR #${prNumber}: ${outcome.error}\n`
+    );
   }
 }
 
