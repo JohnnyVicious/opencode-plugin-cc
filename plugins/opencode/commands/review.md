@@ -55,6 +55,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" review $ARGUMENTS
 - Return the command stdout verbatim, exactly as-is.
 - Do not paraphrase, summarize, or add commentary before or after it.
 - Do not fix any issues mentioned in the review output.
+- If `--post` was set, ALSO follow the "Post-review publishing" steps below before your final turn output.
 
 Background flow:
 - Launch the review with `Bash` in the background:
@@ -67,3 +68,25 @@ Bash({
 ```
 - Do not call `BashOutput` or wait for completion in this turn.
 - After launching the command, tell the user: "OpenCode review started in the background. Check `/opencode:status` for progress."
+- When the user later asks to collect the result and `--post` was part of the original arguments, read the completed `BashOutput` and then follow the "Post-review publishing" steps below on the captured stderr.
+
+Post-review publishing (only when `--post` is set):
+- After the companion script exits, scan its **stderr** (not stdout) for a block shaped like:
+```
+<opencode_post_instructions>
+<pr>412</pr>
+<inline_count>3</inline_count>
+<summary_only_count>2</summary_only_count>
+<payload_path>/tmp/opencode-plugin-cc/post-pr-412-…json</payload_path>
+<command>gh api -X POST "repos/{owner}/{repo}/pulls/412/reviews" --input '/tmp/…json'</command>
+<cleanup>rm -f '/tmp/…json'</cleanup>
+</opencode_post_instructions>
+```
+- If the block is present:
+  1. Run the exact string inside `<command>` via a single `Bash` tool call. Do not edit the command, do not re-serialize the JSON, do not invent a different endpoint — the companion already quoted the path and picked the correct endpoint.
+  2. Parse the response body; GitHub returns a JSON object with an `html_url` field pointing at the newly-created review.
+  3. After the verbatim stdout from step "Return the command stdout verbatim" above, append a single-line status like: `Review posted to PR #<pr>: <html_url>`. Include "(N inline comments)" only when `<inline_count>` is greater than zero.
+  4. Run the exact string inside `<cleanup>` via a second `Bash` tool call to delete the temp payload file. If this fails, mention it once; do not retry or escalate.
+  5. If step 1 fails (non-zero exit, or `gh` returns an error), append `Failed to post review to PR #<pr>: <stderr snippet>` instead of the success line and still run `<cleanup>`. Do not retry.
+- If the block is **not** present (either `--post` wasn't requested or the companion's preparation step failed — in which case stderr will contain a `[opencode-companion] Failed to prepare PR post …` line instead), do nothing extra.
+- Never POST, comment, or otherwise mutate the PR unless you found an `<opencode_post_instructions>` block in stderr on THIS run. Do not "help" by reposting or retrying a previous run's block.

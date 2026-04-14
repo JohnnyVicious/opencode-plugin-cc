@@ -83,7 +83,7 @@ import {
 } from "./lib/worktree.mjs";
 import { readJson, readDenyRules } from "./lib/fs.mjs";
 import { resolveReviewAgent } from "./lib/review-agent.mjs";
-import { postReviewToPr } from "./lib/pr-comments.mjs";
+import { preparePostInstructions, formatPostTrailer } from "./lib/pr-comments.mjs";
 import { parseModelString, selectFreeModel } from "./lib/model.mjs";
 import {
   applyDefaultModelOptions,
@@ -398,7 +398,7 @@ async function handleReview(argv) {
     console.log(result.rendered);
 
     if (postRequested) {
-      await postReviewAndLog(workspace, {
+      await emitPostTrailer(workspace, {
         prNumber: effectivePrNumber,
         result,
         adversarial: false,
@@ -525,7 +525,7 @@ async function handleAdversarialReview(argv) {
     console.log(result.rendered);
 
     if (postRequested) {
-      await postReviewAndLog(workspace, {
+      await emitPostTrailer(workspace, {
         prNumber: effectivePrNumber,
         result,
         adversarial: true,
@@ -564,13 +564,24 @@ function parseConfidenceThreshold(raw) {
 }
 
 /**
- * Shared post-review publishing path. Never throws — pushes a readable
- * log line to stderr on both success and failure because the local
- * review output has already been printed to stdout and the user should
- * not get a non-zero exit just because GitHub was unhappy.
+ * Prepare a GitHub review payload and emit a structured trailer on
+ * stderr describing the `gh api` POST command the slash-command runner
+ * (Claude Code) should execute to actually publish the review.
+ *
+ * The companion deliberately does NOT run the POST itself. Keeping the
+ * network call in Claude's Bash tool:
+ *   - lets Claude show/confirm the payload before it fires,
+ *   - avoids re-implementing gh plumbing (pagination, JSON stream
+ *     reassembly, auth) in Node, and
+ *   - makes failures debuggable from the chat instead of buried in a
+ *     stderr line the user may never see.
+ *
+ * Never throws — on failure the trailer is replaced with a human-
+ * readable `[opencode-companion] Failed to prepare PR post: …` line so
+ * the review output (already on stdout) is not disrupted.
  */
-async function postReviewAndLog(workspace, { prNumber, result, adversarial, confidenceThreshold }) {
-  const outcome = await postReviewToPr(workspace, {
+async function emitPostTrailer(workspace, { prNumber, result, adversarial, confidenceThreshold }) {
+  const prepared = await preparePostInstructions(workspace, {
     prNumber,
     structured: result.structured,
     rendered: result.rendered,
@@ -579,25 +590,14 @@ async function postReviewAndLog(workspace, { prNumber, result, adversarial, conf
     confidenceThreshold,
   });
 
-  if (outcome.posted) {
-    const bits = [`posted review to PR #${prNumber}`];
-    if (outcome.inlineCount > 0) {
-      bits.push(
-        `${outcome.inlineCount} inline comment${outcome.inlineCount === 1 ? "" : "s"}`
-      );
-    }
-    if (outcome.summaryOnlyCount > 0) {
-      bits.push(
-        `${outcome.summaryOnlyCount} summary-only finding${outcome.summaryOnlyCount === 1 ? "" : "s"}`
-      );
-    }
-    const url = outcome.reviewUrl ? ` — ${outcome.reviewUrl}` : "";
-    process.stderr.write(`[opencode-companion] ${bits.join(", ")}${url}\n`);
-  } else {
+  if (!prepared.prepared) {
     process.stderr.write(
-      `[opencode-companion] Failed to post review to PR #${prNumber}: ${outcome.error}\n`
+      `[opencode-companion] Failed to prepare PR post for #${prNumber}: ${prepared.error}\n`
     );
+    return;
   }
+
+  process.stderr.write(formatPostTrailer(prepared));
 }
 
 // ------------------------------------------------------------------
