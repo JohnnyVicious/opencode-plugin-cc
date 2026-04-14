@@ -22,6 +22,7 @@
 import crypto from "node:crypto";
 import os from "node:os";
 import { spawn } from "node:child_process";
+import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { platformShellOption, isProcessAlive as isProcessAliveWithToken } from "./process.mjs";
@@ -31,6 +32,102 @@ const DEFAULT_PORT = 4096;
 const DEFAULT_HOST = "127.0.0.1";
 const SERVER_START_TIMEOUT = 30_000;
 const SERVER_REAP_IDLE_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+
+// Wall-clock budget for a single `sendPrompt` call. Must be longer than
+// any single model turn the user can realistically wait for, but bounded
+// so a wedged socket can't hang the companion forever. Overridable via
+// OPENCODE_COMPANION_PROMPT_TIMEOUT_MS. The tracked-jobs layer has its
+// own 30 min hard timer (OPENCODE_COMPANION_JOB_TIMEOUT_MS) on top of
+// this — this constant is the per-HTTP-call fallback, not the
+// authoritative cap.
+const DEFAULT_PROMPT_TIMEOUT_MS = 30 * 60 * 1000;
+
+function resolvePromptTimeoutMs() {
+  const fromEnv = Number(process.env.OPENCODE_COMPANION_PROMPT_TIMEOUT_MS);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
+  return DEFAULT_PROMPT_TIMEOUT_MS;
+}
+
+/**
+ * POST a JSON body via `node:http` and return the parsed response.
+ *
+ * We deliberately avoid `fetch()` here because Node's bundled undici
+ * imposes a 300_000 ms default `bodyTimeout` that surfaces as
+ * `TypeError: terminated` when the OpenCode server holds the connection
+ * open mid-body for longer than 5 minutes — which is the normal case
+ * for long adversarial reviews against slow/free models. `node:http`
+ * has no such default, so this helper only enforces the explicit
+ * wall-clock timer we pass in.
+ *
+ * See issue: "OpenCode adversarial review failed: terminated" (fetch
+ * failed ~4.5 min into a run). The outer `AbortSignal.timeout()` we
+ * used before was a wall-clock abort, not a dispatcher-level body
+ * timeout, so it did not prevent undici from killing the socket first.
+ *
+ * @param {string} urlString Absolute URL to POST to.
+ * @param {Record<string,string>} headers
+ * @param {unknown} bodyObj JSON-serializable body.
+ * @param {{ timeoutMs?: number }} [opts]
+ * @returns {Promise<{ status: number, body: string }>}
+ */
+function httpPostJson(urlString, headers, bodyObj, opts = {}) {
+  const timeoutMs = Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0
+    ? opts.timeoutMs
+    : resolvePromptTimeoutMs();
+  const url = new URL(urlString);
+  const payload = Buffer.from(JSON.stringify(bodyObj), "utf8");
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (fn, val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn(val);
+    };
+
+    const req = http.request(
+      {
+        protocol: url.protocol,
+        host: url.hostname,
+        port: url.port || (url.protocol === "https:" ? 443 : 80),
+        method: "POST",
+        path: `${url.pathname}${url.search}`,
+        headers: {
+          ...headers,
+          "Content-Length": payload.length,
+        },
+      },
+      (res) => {
+        let data = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          data += chunk;
+        });
+        res.on("end", () => {
+          finish(resolve, { status: res.statusCode ?? 0, body: data });
+        });
+        res.on("error", (err) => finish(reject, err));
+      }
+    );
+
+    req.on("error", (err) => finish(reject, err));
+
+    const timer = setTimeout(() => {
+      finish(
+        reject,
+        new Error(
+          `OpenCode prompt exceeded ${Math.round(timeoutMs / 1000)}s wall-clock timeout ` +
+            `(set OPENCODE_COMPANION_PROMPT_TIMEOUT_MS to raise)`
+        )
+      );
+      req.destroy();
+    }, timeoutMs);
+
+    req.write(payload);
+    req.end();
+  });
+}
 
 function serverStatePath(workspacePath) {
   const key = typeof workspacePath === "string" && workspacePath.length > 0 ? workspacePath : process.cwd();
@@ -255,6 +352,11 @@ export function createClient(baseUrl, opts = {}) {
     /**
      * Send a prompt (synchronous / streaming).
      * Returns the full response text from SSE stream.
+     *
+     * Uses `node:http` directly (via `httpPostJson`) instead of `fetch()`
+     * because Node's bundled undici has a hidden 300_000 ms default
+     * `bodyTimeout` that surfaces as `TypeError: terminated` on long
+     * reviews — see the helper for details.
      */
     sendPrompt: async (sessionId, promptText, opts = {}) => {
       const body = {
@@ -268,19 +370,23 @@ export function createClient(baseUrl, opts = {}) {
       // the custom `review` agent isn't available on a pre-running server.
       if (opts.tools) body.tools = opts.tools;
 
-      const res = await fetch(`${baseUrl}/session/${sessionId}/message`, {
-        method: "POST",
+      const { status, body: responseText } = await httpPostJson(
+        `${baseUrl}/session/${sessionId}/message`,
         headers,
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(600_000), // 10 min for long tasks
-      });
+        body
+      );
 
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(`OpenCode prompt failed ${res.status}: ${text}`);
+      if (status < 200 || status >= 300) {
+        throw new Error(`OpenCode prompt failed ${status}: ${responseText}`);
       }
 
-      return res.json();
+      try {
+        return JSON.parse(responseText);
+      } catch (err) {
+        throw new Error(
+          `OpenCode prompt returned non-JSON response (${status}): ${err.message}`
+        );
+      }
     },
 
     /**
