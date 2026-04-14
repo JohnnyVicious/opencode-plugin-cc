@@ -1,21 +1,27 @@
-// Unit tests for pr-comments.mjs — the module that posts OpenCode
-// review output back to a GitHub PR as a review comment with
-// high-confidence findings anchored inline.
-//
-// We intentionally don't hit the GitHub API from tests. The pure
-// functions (diff parsing, finding classification, summary rendering)
-// are exported for testing and are exercised here. The thin `gh api`
-// wrapper on top is verified by `node --check` and by manual smoke
-// test through the companion CLI.
+// Unit tests for pr-comments.mjs — the module that prepares an
+// OpenCode review for posting back to a GitHub PR. Since the refactor,
+// the module does NOT execute `gh api` to POST anything; it constructs
+// the payload, writes it to a temp file, and emits a structured
+// stderr trailer for Claude Code to act on. Tests therefore cover:
+//   - diff parsing (addable-line classification),
+//   - finding classification (inline vs summary-only),
+//   - summary body rendering,
+//   - payload-file + trailer construction via preparePostInstructions
+//     with an injected `prData` so no real `gh` calls happen.
 
-import { describe, it } from "node:test";
+import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import {
   parseAddableLines,
   buildAddableLineMap,
   splitFindings,
   findingToInlineComment,
   renderSummaryBody,
+  writePayloadFile,
+  shQuote,
+  formatPostTrailer,
+  preparePostInstructions,
 } from "../plugins/opencode/scripts/lib/pr-comments.mjs";
 
 describe("parseAddableLines", () => {
@@ -375,5 +381,200 @@ describe("renderSummaryBody", () => {
     });
     // Pipes must be escaped so they don't split a markdown table cell.
     assert.match(body, /Has \\\| pipe and newline/);
+  });
+});
+
+describe("shQuote", () => {
+  it("wraps simple paths in single quotes", () => {
+    assert.equal(shQuote("/tmp/foo.json"), "'/tmp/foo.json'");
+  });
+
+  it("escapes embedded single quotes via the standard '\\'' trick", () => {
+    assert.equal(shQuote("/tmp/wat's this.json"), "'/tmp/wat'\\''s this.json'");
+  });
+
+  it("treats non-string input as string", () => {
+    assert.equal(shQuote(42), "'42'");
+  });
+});
+
+describe("writePayloadFile", () => {
+  const written = [];
+  after(() => {
+    for (const p of written) {
+      try {
+        fs.unlinkSync(p);
+      } catch {
+        // best-effort cleanup
+      }
+    }
+  });
+
+  it("writes a JSON file with the exact payload and returns its path", () => {
+    const payload = {
+      commit_id: "deadbeef",
+      event: "COMMENT",
+      body: "hello",
+      comments: [{ path: "a.js", line: 1, side: "RIGHT", body: "x" }],
+    };
+    const p = writePayloadFile(42, payload);
+    written.push(p);
+    assert.ok(fs.existsSync(p));
+    assert.ok(p.includes("post-pr-42-"));
+    const roundtripped = JSON.parse(fs.readFileSync(p, "utf8"));
+    assert.deepEqual(roundtripped, payload);
+  });
+
+  it("produces a unique path per call", () => {
+    const a = writePayloadFile(1, {});
+    const b = writePayloadFile(1, {});
+    written.push(a, b);
+    assert.notEqual(a, b);
+  });
+});
+
+describe("formatPostTrailer", () => {
+  it("renders an XML-ish block that Claude can parse with one regex", () => {
+    const trailer = formatPostTrailer({
+      prepared: true,
+      prNumber: 412,
+      inlineCount: 3,
+      summaryOnlyCount: 2,
+      payloadPath: "/tmp/opencode-plugin-cc/post-pr-412-xyz.json",
+      command: `gh api -X POST "repos/{owner}/{repo}/pulls/412/reviews" --input '/tmp/opencode-plugin-cc/post-pr-412-xyz.json'`,
+      cleanup: `rm -f '/tmp/opencode-plugin-cc/post-pr-412-xyz.json'`,
+    });
+    assert.match(trailer, /<opencode_post_instructions>/);
+    assert.match(trailer, /<\/opencode_post_instructions>/);
+    assert.match(trailer, /<pr>412<\/pr>/);
+    assert.match(trailer, /<inline_count>3<\/inline_count>/);
+    assert.match(trailer, /<summary_only_count>2<\/summary_only_count>/);
+    assert.match(trailer, /<payload_path>[^<]*post-pr-412-xyz\.json<\/payload_path>/);
+    assert.match(trailer, /<command>gh api -X POST[^<]*<\/command>/);
+    assert.match(trailer, /<cleanup>rm -f[^<]*<\/cleanup>/);
+  });
+});
+
+describe("preparePostInstructions (with injected prData)", () => {
+  const written = [];
+  after(() => {
+    for (const p of written) {
+      try {
+        fs.unlinkSync(p);
+      } catch {
+        // best-effort cleanup
+      }
+    }
+  });
+
+  const structured = {
+    verdict: "needs-attention",
+    summary: "Two issues.",
+    findings: [
+      {
+        severity: "high",
+        confidence: 0.92,
+        title: "Race condition",
+        file: "src/foo.js",
+        line_start: 11,
+        line_end: 11,
+        body: "Two writers can observe stale state.",
+        recommendation: "Hold the lock around the read-modify-write.",
+      },
+      {
+        severity: "medium",
+        confidence: 0.55,
+        title: "Missing retries",
+        file: "src/bar.js",
+        line_start: 22,
+        line_end: 22,
+        body: "Downstream 5xx is not retried.",
+        recommendation: "Wrap in exponential backoff.",
+      },
+    ],
+  };
+
+  const prData = {
+    headSha: "cafef00d",
+    files: [
+      {
+        filename: "src/foo.js",
+        patch: "@@ -10,1 +10,2 @@\n a\n+b",
+      },
+    ],
+  };
+
+  it("builds a payload file and command, and bypasses gh entirely", async () => {
+    const out = await preparePostInstructions("/nowhere", {
+      prNumber: 412,
+      structured,
+      model: { providerID: "openrouter", modelID: "anthropic/claude-opus-4-6" },
+      adversarial: true,
+      confidenceThreshold: 0.8,
+      prData,
+    });
+    assert.equal(out.prepared, true);
+    written.push(out.payloadPath);
+
+    // The command must be a `gh api -X POST ...` with the payload path
+    // quoted. It must also contain the {owner}/{repo} placeholders so
+    // gh resolves them from the current repo at execution time.
+    assert.match(out.command, /^gh api -X POST "repos\/\{owner\}\/\{repo\}\/pulls\/412\/reviews" --input '/);
+    assert.match(out.command, /\.json'$/);
+    assert.match(out.cleanup, /^rm -f '/);
+
+    // Classification: the high-confidence finding targets line 11
+    // which is addressable (it's in the diff), so it becomes inline;
+    // the medium-confidence finding has no diff coverage and stays
+    // summary-only.
+    assert.equal(out.inlineCount, 1);
+    assert.equal(out.summaryOnlyCount, 1);
+
+    const payload = JSON.parse(fs.readFileSync(out.payloadPath, "utf8"));
+    assert.equal(payload.commit_id, "cafef00d");
+    assert.equal(payload.event, "COMMENT");
+    assert.ok(payload.body.includes("OpenCode Adversarial Review"));
+    assert.ok(payload.body.includes("Needs attention"));
+    assert.equal(payload.comments.length, 1);
+    assert.equal(payload.comments[0].path, "src/foo.js");
+    assert.equal(payload.comments[0].line, 11);
+    assert.equal(payload.comments[0].side, "RIGHT");
+    assert.match(payload.comments[0].body, /Race condition/);
+    assert.match(payload.comments[0].body, /92%/);
+  });
+
+  it("returns { prepared: false, error } if prData fetch would fail", async () => {
+    // We don't inject prData, so the module would try to call `gh pr
+    // view` in `/definitely/not/a/repo` and fail. We only want to
+    // verify the failure path wraps the error without throwing.
+    const out = await preparePostInstructions("/definitely/not/a/repo", {
+      prNumber: 1,
+      structured,
+      adversarial: false,
+      confidenceThreshold: 0.8,
+      // NOTE: `prData` intentionally omitted
+    });
+    // We can't assert the exact error message because it depends on
+    // whether `gh` is installed on the host, but we know `prepared`
+    // must be false.
+    assert.equal(out.prepared, false);
+    assert.ok(typeof out.error === "string" && out.error.length > 0);
+  });
+
+  it("handles structured=null by falling back to a rendered-text body", async () => {
+    const out = await preparePostInstructions("/nowhere", {
+      prNumber: 99,
+      structured: null,
+      rendered: "Raw review the model produced.",
+      adversarial: false,
+      confidenceThreshold: 0.8,
+      prData: { headSha: "cafef00d", files: [] },
+    });
+    assert.equal(out.prepared, true);
+    written.push(out.payloadPath);
+    const payload = JSON.parse(fs.readFileSync(out.payloadPath, "utf8"));
+    assert.ok(payload.body.includes("did not return structured JSON"));
+    assert.ok(payload.body.includes("Raw review the model produced"));
+    assert.deepEqual(payload.comments, []);
   });
 });

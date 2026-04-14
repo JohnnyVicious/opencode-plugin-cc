@@ -1,8 +1,8 @@
-// Post an OpenCode review back to a GitHub pull request.
+// Prepare a GitHub PR review payload from an OpenCode review.
 //
 // Structured review findings from OpenCode have a `file`, `line_start`,
-// `line_end`, `confidence`, and a recommendation. We can turn them into:
-//   - a summary comment on the PR with the full findings table, and
+// `line_end`, `confidence`, and a recommendation. We turn them into:
+//   - a summary comment body for the PR review, and
 //   - inline review comments anchored to specific lines for findings
 //     whose confidence exceeds the user-supplied threshold (default 0.8)
 //     AND whose target line is addressable on GitHub's unified diff for
@@ -14,31 +14,46 @@
 // high-confidence finding whose line is outside the diff silently
 // degrades to summary-only; we never drop the finding.
 //
-// We post via `gh api` piping a JSON payload on stdin rather than via
-// `gh pr review`, because the CLI wrapper doesn't support inline review
-// comments directly and serializing a comments array through repeated
-// -f/-F flags is fragile.
+// Execution model: this module does NOT call `gh api` to POST the
+// review itself. It constructs a ready-to-POST JSON payload, writes it
+// to a temp file, and returns a `gh api … --input <file>` command. The
+// slash-command runner (Claude Code) is responsible for executing that
+// command via its Bash tool. This keeps complex gh plumbing out of
+// Node, lets Claude show/confirm the payload before it fires, and
+// sidesteps the whole class of JSON-stream-reassembly bugs that come
+// with `gh api --paginate`.
 
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 
 /**
- * Post a review to PR `prNumber`. Never throws on posting errors —
- * returns a result object the caller can log, because the review text
- * was already produced and the local run should not fail because of a
- * network or auth glitch on GitHub.
+ * Prepare a POST-ready GitHub review payload for `prNumber`. Never
+ * throws — returns `{ prepared: false, error }` on failure. Callers
+ * should emit the returned command as a structured trailer for Claude
+ * to execute.
  *
  * @param {string} workspace - cwd for the `gh` invocations
  * @param {object} opts
  * @param {number} opts.prNumber
  * @param {object|null} opts.structured - parsed review JSON (or null)
- * @param {string} opts.rendered - human-readable review output (fallback
- *   when `structured` is null)
+ * @param {string} [opts.rendered] - fallback raw review text (used
+ *   when `structured` is null so the summary comment still has
+ *   *something* to say)
  * @param {{ providerID: string, modelID: string }|null} opts.model
  * @param {boolean} opts.adversarial
  * @param {number} [opts.confidenceThreshold=0.8]
- * @returns {Promise<{ posted: boolean, reviewUrl?: string, inlineCount: number, summaryOnlyCount: number, error?: string }>}
+ * @param {object} [opts.prData] - pre-fetched `{ headSha, files }`,
+ *   primarily for tests; production callers omit this and let the
+ *   module fetch it via `gh`.
+ * @returns {Promise<
+ *   | { prepared: true, command: string, cleanup: string, payloadPath: string, inlineCount: number, summaryOnlyCount: number, prNumber: number }
+ *   | { prepared: false, error: string }
+ * >}
  */
-export async function postReviewToPr(workspace, opts) {
+export async function preparePostInstructions(workspace, opts) {
   const {
     prNumber,
     structured,
@@ -49,9 +64,11 @@ export async function postReviewToPr(workspace, opts) {
   } = opts;
 
   try {
-    const prData = await fetchPrData(workspace, prNumber);
+    const prData = opts.prData ?? (await fetchPrData(workspace, prNumber));
 
-    const findings = Array.isArray(structured?.findings) ? structured.findings : [];
+    const findings = Array.isArray(structured?.findings)
+      ? structured.findings
+      : [];
     const addableByFile = buildAddableLineMap(prData.files);
     const { inline, summaryOnly } = splitFindings(
       findings,
@@ -76,30 +93,90 @@ export async function postReviewToPr(workspace, opts) {
       comments: inline.map(findingToInlineComment),
     };
 
-    const resp = await ghPostReview(workspace, prNumber, payload);
+    const payloadPath = writePayloadFile(prNumber, payload);
+    const quotedPath = shQuote(payloadPath);
+    const command = `gh api -X POST "repos/{owner}/{repo}/pulls/${prNumber}/reviews" --input ${quotedPath}`;
+    const cleanup = `rm -f ${quotedPath}`;
+
     return {
-      posted: true,
-      reviewUrl: resp.html_url,
+      prepared: true,
+      command,
+      cleanup,
+      payloadPath,
       inlineCount: inline.length,
       summaryOnlyCount: summaryOnly.length,
+      prNumber,
     };
   } catch (err) {
-    return {
-      posted: false,
-      error: err.message,
-      inlineCount: 0,
-      summaryOnlyCount: 0,
-    };
+    return { prepared: false, error: err.message };
   }
 }
 
 // ---------------------------------------------------------------------
-// gh plumbing
+// Payload file + shell quoting
 // ---------------------------------------------------------------------
 
 /**
- * Run a `gh` subcommand and return parsed stdout. `input` is piped to
- * stdin. Rejects with a useful error on non-zero exit codes.
+ * Write `payload` to a unique temp file and return its absolute path.
+ * Exported so tests can call it directly and assert file contents.
+ */
+export function writePayloadFile(prNumber, payload) {
+  const dir = path.join(os.tmpdir(), "opencode-plugin-cc");
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const suffix = crypto.randomBytes(4).toString("hex");
+  const filename = `post-pr-${prNumber}-${Date.now()}-${suffix}.json`;
+  const full = path.join(dir, filename);
+  fs.writeFileSync(full, JSON.stringify(payload, null, 2), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  return full;
+}
+
+/**
+ * POSIX single-quote `s` so bash/zsh pass it through literally. The
+ * only escape needed inside single quotes is the closing quote itself,
+ * which is handled by the standard `'\''` trick.
+ */
+export function shQuote(s) {
+  return `'${String(s).replace(/'/g, "'\\''")}'`;
+}
+
+// ---------------------------------------------------------------------
+// Trailer emission (for Claude Code to act on)
+// ---------------------------------------------------------------------
+
+/**
+ * Render the stderr trailer the slash command reads to know it should
+ * POST the review. Kept plain text with tagged XML-ish children so
+ * Claude can parse it with a single regex and extract the command
+ * verbatim.
+ *
+ * @param {{ prepared: true, command: string, cleanup: string, payloadPath: string, inlineCount: number, summaryOnlyCount: number, prNumber: number }} prepared
+ * @returns {string}
+ */
+export function formatPostTrailer(prepared) {
+  const lines = [
+    "<opencode_post_instructions>",
+    `<pr>${prepared.prNumber}</pr>`,
+    `<inline_count>${prepared.inlineCount}</inline_count>`,
+    `<summary_only_count>${prepared.summaryOnlyCount}</summary_only_count>`,
+    `<payload_path>${prepared.payloadPath}</payload_path>`,
+    `<command>${prepared.command}</command>`,
+    `<cleanup>${prepared.cleanup}</cleanup>`,
+    "</opencode_post_instructions>",
+    "",
+  ];
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------
+// gh plumbing (read-only — no POSTs)
+// ---------------------------------------------------------------------
+
+/**
+ * Run a `gh` subcommand and return stdout. `input` is piped to stdin.
+ * Rejects with a useful error on non-zero exit codes.
  */
 function runGh(workspace, args, { input } = {}) {
   return new Promise((resolve, reject) => {
@@ -135,6 +212,17 @@ function runGh(workspace, args, { input } = {}) {
   });
 }
 
+/**
+ * Fetch the PR head SHA + the file list (with unified-diff patches) so
+ * we can classify findings into inline vs summary-only before writing
+ * the payload. Both calls are single-shot — we deliberately do NOT use
+ * `gh api --paginate`, because its output is a concatenation of per-page
+ * JSON arrays (`][` at page boundaries) and string-splitting that apart
+ * corrupts any patch whose content legitimately contains `][` (common
+ * in JS/Go code). GitHub allows `per_page=100` here, which covers the
+ * vast majority of real PRs. On a 100+ file PR, findings in the tail
+ * files simply degrade to summary-only, which is better than crashing.
+ */
 async function fetchPrData(workspace, prNumber) {
   const headJson = await runGh(workspace, [
     "pr",
@@ -155,63 +243,20 @@ async function fetchPrData(workspace, prNumber) {
     );
   }
 
-  // `gh api` paginates via `--paginate`, but the pulls/files endpoint
-  // returns at most 30 per page by default — bump per_page to 100 and
-  // paginate so huge PRs don't lose files past the first page.
   const filesJson = await runGh(workspace, [
     "api",
-    "--paginate",
     `repos/{owner}/{repo}/pulls/${prNumber}/files?per_page=100`,
   ]);
-  const files = parsePaginatedJson(filesJson);
-  return { headSha, files };
-}
-
-/**
- * `gh api --paginate` concatenates the per-page JSON arrays as separate
- * documents rather than a single merged array, so a naive JSON.parse
- * only sees the last page. Split on the `][` page boundary and merge.
- */
-function parsePaginatedJson(text) {
-  const trimmed = text.trim();
-  if (!trimmed) return [];
-  // The simple case: gh emitted one page as one array.
-  if (trimmed.startsWith("[") && !trimmed.includes("][")) {
-    return JSON.parse(trimmed);
-  }
-  // Multi-page: treat `][` as a page separator and reconstitute.
-  const chunks = trimmed.split(/\]\s*\[/).map((chunk, i, arr) => {
-    let c = chunk;
-    if (i > 0) c = `[${c}`;
-    if (i < arr.length - 1) c = `${c}]`;
-    return c;
-  });
-  const out = [];
-  for (const chunk of chunks) {
-    const arr = JSON.parse(chunk);
-    if (Array.isArray(arr)) out.push(...arr);
-  }
-  return out;
-}
-
-async function ghPostReview(workspace, prNumber, payload) {
-  const stdout = await runGh(
-    workspace,
-    [
-      "api",
-      "-X",
-      "POST",
-      `repos/{owner}/{repo}/pulls/${prNumber}/reviews`,
-      "--input",
-      "-",
-    ],
-    { input: JSON.stringify(payload) }
-  );
+  let files;
   try {
-    return JSON.parse(stdout);
+    files = JSON.parse(filesJson);
   } catch (err) {
-    throw new Error(`gh api POST reviews returned invalid JSON: ${err.message}`);
+    throw new Error(
+      `gh api pulls/${prNumber}/files returned invalid JSON: ${err.message}`
+    );
   }
+  if (!Array.isArray(files)) files = [];
+  return { headSha, files };
 }
 
 // ---------------------------------------------------------------------
@@ -224,8 +269,7 @@ async function ghPostReview(workspace, prNumber, payload) {
  * field of a review comment. Those are lines present in the diff as
  * either additions (`+`) or unchanged context (` `). Deletions (`-`)
  * only exist on the LEFT side and would need `side: "LEFT"`, which we
- * don't bother supporting — our findings target the current state of
- * the code, not the old version.
+ * don't support — our findings target the current state of the code.
  *
  * Exported for tests.
  *
