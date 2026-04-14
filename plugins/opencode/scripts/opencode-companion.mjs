@@ -69,7 +69,6 @@ import { createJobRecord, runTrackedJob, getClaudeSessionId } from "./lib/tracke
 import {
   renderStatus,
   renderResult,
-  renderReview,
   renderSetup,
   extractResponseModel,
   formatModelHeader,
@@ -83,8 +82,6 @@ import {
 } from "./lib/worktree.mjs";
 import { readJson, readDenyRules } from "./lib/fs.mjs";
 import { resolveReviewAgent } from "./lib/review-agent.mjs";
-import { preparePostInstructions, formatPostTrailer } from "./lib/pr-comments.mjs";
-import { tryParseReview } from "./lib/review-parser.mjs";
 import { parseModelString, selectFreeModel } from "./lib/model.mjs";
 import {
   applyDefaultModelOptions,
@@ -302,9 +299,9 @@ async function resolveRequestedModel(options) {
 
 async function handleReview(argv) {
   const { options } = parseArgs(argv, {
-    valueOptions: ["base", "scope", "model", "pr", "path", "confidence-threshold"],
+    valueOptions: ["base", "scope", "model", "pr", "path"],
     multiValueOptions: ["path"],
-    booleanOptions: ["wait", "background", "free", "post"],
+    booleanOptions: ["wait", "background", "free"],
   });
 
   const prNumber = options.pr ? Number(options.pr) : null;
@@ -315,22 +312,6 @@ async function handleReview(argv) {
 
   const paths = normalizePathOption(options.path);
   const effectivePrNumber = paths?.length ? null : prNumber;
-
-  const postRequested = Boolean(options.post);
-  if (postRequested && !effectivePrNumber) {
-    console.error(
-      "--post requires --pr <number> (posting back to GitHub is PR-only; --path reviews have nowhere to post)."
-    );
-    process.exit(1);
-  }
-
-  let confidenceThreshold;
-  try {
-    confidenceThreshold = parseConfidenceThreshold(options["confidence-threshold"]);
-  } catch (err) {
-    console.error(err.message);
-    process.exit(1);
-  }
 
   const workspace = await resolveWorkspace();
   const state = loadState(workspace);
@@ -382,33 +363,22 @@ async function handleReview(argv) {
 
       report("finalizing", "Processing review output...");
 
-      // Try to parse structured output. `tryParseReview` tolerates the
-      // common LLM failure mode where a string value contains an
-      // unescaped `"` (usually embedded code or JSON literals in the
-      // summary) and strict JSON.parse would otherwise give up.
+      // No structured-output contract anymore. OpenCode returns prose;
+      // the companion passes it through unchanged so the slash command
+      // runner (Claude Code) can present it however it likes and, if
+      // the user asked, post it to a PR with its own Bash tool.
       const text = extractResponseText(response);
-      let structured = tryParseReview(text);
       const usedModel = extractResponseModel(response);
 
       return {
-        rendered: formatModelHeader(usedModel) + (structured ? renderReview(structured) : text),
+        rendered: formatModelHeader(usedModel) + text,
         raw: response,
-        structured,
         model: usedModel,
       };
     });
 
     saveLastReview(workspace, result.rendered);
     console.log(result.rendered);
-
-    if (postRequested) {
-      await emitPostTrailer(workspace, {
-        prNumber: effectivePrNumber,
-        result,
-        adversarial: false,
-        confidenceThreshold,
-      });
-    }
   } catch (err) {
     console.error(`Review failed: ${err.message}`);
     process.exit(1);
@@ -417,9 +387,9 @@ async function handleReview(argv) {
 
 async function handleAdversarialReview(argv) {
   const { options, positional } = parseArgs(argv, {
-    valueOptions: ["base", "scope", "model", "pr", "path", "confidence-threshold"],
+    valueOptions: ["base", "scope", "model", "pr", "path"],
     multiValueOptions: ["path"],
-    booleanOptions: ["wait", "background", "free", "post"],
+    booleanOptions: ["wait", "background", "free"],
   });
 
   const workspace = await resolveWorkspace();
@@ -457,22 +427,6 @@ async function handleAdversarialReview(argv) {
 
   const paths = normalizePathOption(options.path);
   const effectivePrNumber = paths?.length ? null : prNumber;
-
-  const postRequested = Boolean(options.post);
-  if (postRequested && !effectivePrNumber) {
-    console.error(
-      "--post requires --pr <number> (posting back to GitHub is PR-only; --path reviews have nowhere to post)."
-    );
-    process.exit(1);
-  }
-
-  let confidenceThreshold;
-  try {
-    confidenceThreshold = parseConfidenceThreshold(options["confidence-threshold"]);
-  } catch (err) {
-    console.error(err.message);
-    process.exit(1);
-  }
 
   const job = createJobRecord(workspace, "adversarial-review", {
     base: options.base,
@@ -513,96 +467,24 @@ async function handleAdversarialReview(argv) {
 
       report("finalizing", "Processing review output...");
 
-      // See note on `tryParseReview` in handleReview — same reason.
+      // See note in handleReview — no structured-output contract
+      // anymore; prose is passed through unchanged.
       const text = extractResponseText(response);
-      let structured = tryParseReview(text);
       const usedModel = extractResponseModel(response);
 
       return {
-        rendered: formatModelHeader(usedModel) + (structured ? renderReview(structured) : text),
+        rendered: formatModelHeader(usedModel) + text,
         raw: response,
-        structured,
         model: usedModel,
       };
     });
 
     saveLastReview(workspace, result.rendered);
     console.log(result.rendered);
-
-    if (postRequested) {
-      await emitPostTrailer(workspace, {
-        prNumber: effectivePrNumber,
-        result,
-        adversarial: true,
-        confidenceThreshold,
-      });
-    }
   } catch (err) {
     console.error(`Adversarial review failed: ${err.message}`);
     process.exit(1);
   }
-}
-
-/**
- * Parse `--confidence-threshold` into a 0..1 float. Accepts raw floats
- * (`0.8`) or percentage strings (`80`, `80%`). Returns the default 0.8
- * when the option is unset.
- */
-function parseConfidenceThreshold(raw) {
-  if (raw == null || raw === "") return 0.8;
-  let text = String(raw).trim();
-  const isPercent = text.endsWith("%");
-  if (isPercent) text = text.slice(0, -1).trim();
-  const n = Number(text);
-  if (!Number.isFinite(n)) {
-    throw new Error(
-      `Invalid --confidence-threshold value: ${raw} (expected a number between 0 and 1, or a percentage like 80)`
-    );
-  }
-  const normalized = isPercent || n > 1 ? n / 100 : n;
-  if (normalized < 0 || normalized > 1) {
-    throw new Error(
-      `Invalid --confidence-threshold value: ${raw} (must be between 0 and 1, or 0 and 100 if expressed as a percentage)`
-    );
-  }
-  return normalized;
-}
-
-/**
- * Prepare a GitHub review payload and emit a structured trailer on
- * stderr describing the `gh api` POST command the slash-command runner
- * (Claude Code) should execute to actually publish the review.
- *
- * The companion deliberately does NOT run the POST itself. Keeping the
- * network call in Claude's Bash tool:
- *   - lets Claude show/confirm the payload before it fires,
- *   - avoids re-implementing gh plumbing (pagination, JSON stream
- *     reassembly, auth) in Node, and
- *   - makes failures debuggable from the chat instead of buried in a
- *     stderr line the user may never see.
- *
- * Never throws — on failure the trailer is replaced with a human-
- * readable `[opencode-companion] Failed to prepare PR post: …` line so
- * the review output (already on stdout) is not disrupted.
- */
-async function emitPostTrailer(workspace, { prNumber, result, adversarial, confidenceThreshold }) {
-  const prepared = await preparePostInstructions(workspace, {
-    prNumber,
-    structured: result.structured,
-    rendered: result.rendered,
-    model: result.model,
-    adversarial,
-    confidenceThreshold,
-  });
-
-  if (!prepared.prepared) {
-    process.stderr.write(
-      `[opencode-companion] Failed to prepare PR post for #${prNumber}: ${prepared.error}\n`
-    );
-    return;
-  }
-
-  process.stderr.write(formatPostTrailer(prepared));
 }
 
 // ------------------------------------------------------------------
