@@ -1,6 +1,6 @@
 ---
 description: Run a steerable adversarial OpenCode review that challenges implementation and design decisions
-argument-hint: '[--wait|--background] [--base <ref>] [--model <id> | --free] [--pr <number>] [--post] [--confidence-threshold <n>] [--path <path>] [--path <path2>] [focus area or custom review instructions]'
+argument-hint: '[--wait|--background] [--base <ref>] [--model <id> | --free] [--pr <number>] [--path <path>] [--path <path2>] [focus area or custom review instructions]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), Bash(gh:*), AskUserQuestion
 ---
@@ -40,8 +40,6 @@ Argument handling:
 - `--model <id>` overrides the saved setup default model and OpenCode's own default model for this single review (e.g. `--model openrouter/anthropic/claude-opus-4-6`). Pass it through verbatim if the user supplied it.
 - `--free` tells the companion script to shell out to `opencode models`, filter for first-party `opencode/*` free-tier models (those ending in `:free` or `-free`), and pick one at random for this review. Restricted to the `opencode/*` provider because OpenRouter free-tier models have inconsistent tool-use support, and the review agent needs `read`/`grep`/`glob`/`list`. Pass it through verbatim if the user supplied it. `--free` and `--model` are mutually exclusive — the companion will error if both are given.
 - `--pr <number>` reviews a GitHub pull request via `gh pr diff` instead of the local working tree. The cwd must be a git repo whose remote points at the PR's repository, and `gh` must be installed and authenticated.
-- `--post` (opt-in, requires `--pr`) publishes the adversarial review back to the PR as a GitHub review comment. The summary (verdict + findings table + collapsible full findings) is posted as the review body, and any finding with confidence at or above the threshold whose line is part of the PR diff is posted as an inline review comment. Findings below the threshold or pointing at lines outside the diff stay in the summary only. The review is always published with `event: "COMMENT"` — never `REQUEST_CHANGES` — because this tool is advisory. Pass `--post` through verbatim if the user supplied it.
-- `--confidence-threshold <n>` (optional, default `0.8`) sets the confidence bar for inline comments when `--post` is set. Accepts `0..1` floats or percentages (`80`, `80%`). Pass through verbatim.
 - `--path <path>` reviews a specific file or directory instead of git diff. Can be specified multiple times (`--path src --path lib`). When `--path` is set, the review is assembled from the actual file contents at those paths rather than from `git diff`. This is useful for reviewing specific directories, fixed sets of files, or large untracked/imported code drops. Mutually exclusive with `--pr` (paths take precedence over PR mode).
 
 PR reference extraction (REQUIRED — read this carefully):
@@ -60,7 +58,7 @@ Focus text quoting (REQUIRED):
   - `/opencode:adversarial-review --background look for race conditions in $RUNTIME` → `node ... adversarial-review --background 'look for race conditions in $RUNTIME'`
 
 Foreground flow:
-- First, transform `$ARGUMENTS` using the **PR reference extraction** and **Focus text quoting** rules above. Pass through `--wait`, `--background`, `--base`, `--scope`, `--model`, `--pr`, `--post`, and `--confidence-threshold` flags as-is; convert any `PR #N` reference in the user's text to `--pr N`; single-quote whatever free-form focus text remains.
+- First, transform `$ARGUMENTS` using the **PR reference extraction** and **Focus text quoting** rules above. Pass through `--wait`, `--background`, `--base`, `--scope`, `--model`, and `--pr` flags as-is; convert any `PR #N` reference in the user's text to `--pr N`; single-quote whatever free-form focus text remains.
 - Then run the resulting command (illustrative shape — substitute the actual transformed args):
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" adversarial-review <flags> [--pr N] ['<quoted focus text>']
@@ -68,7 +66,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/opencode-companion.mjs" adversarial-review <
 - Return the command stdout verbatim, exactly as-is.
 - Do not paraphrase, summarize, or add commentary before or after it.
 - Do not fix any issues mentioned in the review output.
-- If `--post` was set, ALSO follow the "Post-review publishing" steps below before your final turn output.
+- If the user's original request asked for the review to be posted/commented/published to the PR, follow the "Optional: post the review to GitHub" section below after returning the review output.
 
 Background flow:
 - Apply the same `$ARGUMENTS` transformation as the foreground flow above (PR ref extraction + focus text single-quoting).
@@ -82,25 +80,19 @@ Bash({
 ```
 - Do not call `BashOutput` or wait for completion in this turn.
 - After launching the command, tell the user: "OpenCode adversarial review started in the background. Check `/opencode:status` for progress."
-- When the user later asks to collect the result and `--post` was part of the original arguments, read the completed `BashOutput` and then follow the "Post-review publishing" steps below on the captured stderr.
+- When the user later asks to collect the result and the original request asked for a PR post, read the completed `BashOutput`, return the review output, then follow the "Optional: post the review to GitHub" section below.
 
-Post-review publishing (only when `--post` is set):
-- After the companion script exits, scan its **stderr** (not stdout) for a block shaped like:
-```
-<opencode_post_instructions>
-<pr>412</pr>
-<inline_count>3</inline_count>
-<summary_only_count>2</summary_only_count>
-<payload_path>/tmp/opencode-plugin-cc/post-pr-412-…json</payload_path>
-<command>gh api -X POST "repos/{owner}/{repo}/pulls/412/reviews" --input '/tmp/…json'</command>
-<cleanup>rm -f '/tmp/…json'</cleanup>
-</opencode_post_instructions>
-```
-- If the block is present:
-  1. Run the exact string inside `<command>` via a single `Bash` tool call. Do not edit the command, do not re-serialize the JSON, do not invent a different endpoint — the companion already quoted the path and picked the correct endpoint.
-  2. Parse the response body; GitHub returns a JSON object with an `html_url` field pointing at the newly-created review.
-  3. After the verbatim stdout from step "Return the command stdout verbatim" above, append a single-line status like: `Review posted to PR #<pr>: <html_url>`. Include "(N inline comments)" only when `<inline_count>` is greater than zero.
-  4. Run the exact string inside `<cleanup>` via a second `Bash` tool call to delete the temp payload file. If this fails, mention it once; do not retry or escalate.
-  5. If step 1 fails (non-zero exit, or `gh` returns an error), append `Failed to post review to PR #<pr>: <stderr snippet>` instead of the success line and still run `<cleanup>`. Do not retry.
-- If the block is **not** present (either `--post` wasn't requested or the companion's preparation step failed — in which case stderr will contain a `[opencode-companion] Failed to prepare PR post …` line instead), do nothing extra.
-- Never POST, comment, or otherwise mutate the PR unless you found an `<opencode_post_instructions>` block in stderr on THIS run. Do not "help" by reposting or retrying a previous run's block.
+Optional: post the review to GitHub (only when the user explicitly asked):
+- Triggers: the user's slash-command invocation said something like "and post it to the PR", "comment it back", "publish the review", "review on GitHub". A bare `/opencode:adversarial-review --pr 412` is NOT a request to post. If in doubt, do not post.
+- Preconditions: `--pr <N>` was in the arguments AND the user's request explicitly asked for publishing. Never post a review for a `--path` run (paths have no PR to post to).
+- What to post:
+  - A single GitHub PR review (`event: COMMENT`) containing a clean markdown summary body written in your own voice based on the review output. Do not paste the raw review output verbatim into the body; rewrite it as a digest with a short ship/no-ship line, the handful of material findings, and a closing note.
+  - Optionally, for findings where you are confident about the exact file and line, include inline review comments anchored to those lines. Only include an inline comment if the line is part of the PR's unified diff (`gh api repos/{owner}/{repo}/pulls/<N>/files` → `patch` fields). Skip inline anchoring when the review is prose-only or the lines are unclear.
+- How to post:
+  1. Compose the payload as a single JSON object: `{ "commit_id": "<head SHA>", "event": "COMMENT", "body": "<markdown summary>", "comments": [ { "path": "...", "line": N, "side": "RIGHT", "body": "..." }, ... ] }`. Get the head SHA via `gh pr view <N> --json headRefOid --jq .headRefOid`.
+  2. Write the payload to a temp file (`/tmp/opencode-post-<pr>-<random>.json`) using the `Write` tool so you control escaping — do NOT try to build a heredoc inside a Bash call.
+  3. Run `gh api -X POST "repos/{owner}/{repo}/pulls/<N>/reviews" --input /tmp/...json` via a single `Bash` call.
+  4. Extract `html_url` from the response and append a one-line status to your final turn output: `Review posted to PR #<N>: <url>`.
+  5. Delete the temp file with `rm -f /tmp/...json`.
+  6. On failure, say `Failed to post review to PR #<N>: <error>` and do not retry.
+- The review is always published with `event: "COMMENT"` — never `REQUEST_CHANGES`. This tool is advisory, not gatekeeping.

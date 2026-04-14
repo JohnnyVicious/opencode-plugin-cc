@@ -199,7 +199,22 @@ function buildStandardReviewPrompt(diff, status, changedFiles, opts) {
 
   return `You are performing a code review of ${targetLabel}.
 
-Review the following changes and provide structured feedback in JSON format matching the review-output schema.
+Respond in plain markdown prose. Do NOT wrap the review in JSON and do
+NOT emit a code-fenced schema. Open with a one-line ship/no-ship
+assessment in your own words.
+
+For every material finding, use the shape below (literal headings, in
+order):
+
+### <SEVERITY> — <title>
+- **File:** \`<path>\`:<line_start>-<line_end>
+- **Confidence:** <low | medium | high>
+
+<one or two paragraphs of analysis>
+
+**Recommendation:** <concrete change>
+
+Severity must be one of \`LOW\`, \`MEDIUM\`, \`HIGH\`, \`CRITICAL\`.
 
 Focus on:
 - Correctness and logic errors
@@ -208,7 +223,9 @@ Focus on:
 - Missing error handling
 - API contract violations
 
-Be concise and actionable. Only report real issues, not style preferences.
+Be concise and actionable. Only report real issues, not style
+preferences. If you have no material findings, say so directly after
+the opening line and stop.
 
 ${collectionGuidance}
 
