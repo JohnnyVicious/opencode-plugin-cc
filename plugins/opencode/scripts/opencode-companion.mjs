@@ -84,6 +84,7 @@ import {
 import { readJson, readDenyRules } from "./lib/fs.mjs";
 import { resolveReviewAgent } from "./lib/review-agent.mjs";
 import { preparePostInstructions, formatPostTrailer } from "./lib/pr-comments.mjs";
+import { tryParseReview } from "./lib/review-parser.mjs";
 import { parseModelString, selectFreeModel } from "./lib/model.mjs";
 import {
   applyDefaultModelOptions,
@@ -381,9 +382,12 @@ async function handleReview(argv) {
 
       report("finalizing", "Processing review output...");
 
-      // Try to parse structured output
+      // Try to parse structured output. `tryParseReview` tolerates the
+      // common LLM failure mode where a string value contains an
+      // unescaped `"` (usually embedded code or JSON literals in the
+      // summary) and strict JSON.parse would otherwise give up.
       const text = extractResponseText(response);
-      let structured = tryParseJson(text);
+      let structured = tryParseReview(text);
       const usedModel = extractResponseModel(response);
 
       return {
@@ -509,8 +513,9 @@ async function handleAdversarialReview(argv) {
 
       report("finalizing", "Processing review output...");
 
+      // See note on `tryParseReview` in handleReview — same reason.
       const text = extractResponseText(response);
-      let structured = tryParseJson(text);
+      let structured = tryParseReview(text);
       const usedModel = extractResponseModel(response);
 
       return {
@@ -1318,21 +1323,4 @@ function extractResponseText(response) {
   }
 
   return JSON.stringify(response, null, 2);
-}
-
-
-/**
- * Try to parse a string as JSON, returning null on failure.
- * @param {string} text
- * @returns {object|null}
- */
-function tryParseJson(text) {
-  // Look for JSON in the text (may be wrapped in markdown code blocks)
-  const jsonMatch = text.match(/```(?:json)?\s*\n([\s\S]*?)\n```/);
-  const candidate = jsonMatch ? jsonMatch[1] : text;
-  try {
-    return JSON.parse(candidate.trim());
-  } catch {
-    return null;
-  }
 }
