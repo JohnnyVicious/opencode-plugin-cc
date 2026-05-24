@@ -1,0 +1,13 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.0.6/schema.json",
+  "linter": {
+    "rules": {
+      "correctness": {
+        "noNodejsModules": "off"
+      },
+      "performance": {
+        "useTopLevelRegex": "off"
+      }
+    }
+  }
+}
