@@ -1,0 +1,17 @@
+---
+engines:
+  opengrep:
+    exclude_paths:
+      # Codacy SRM issue #72 is dominated by Opengrep's generic
+      # non-literal filesystem/SSRF rules on these reviewed companion-local
+      # paths and loopback-only OpenCode client URLs. The process test entry is
+      # an isolated temp-dir fixture for Windows path resolution regression
+      # coverage. ESLint, Biome, SonarCloud, and local tests still run.
+      - "plugins/opencode/scripts/lib/git.mjs"
+      - "plugins/opencode/scripts/lib/opencode-server.mjs"
+      - "plugins/opencode/scripts/lib/process.mjs"
+      - "plugins/opencode/scripts/lib/state.mjs"
+      - "plugins/opencode/scripts/opencode-companion.mjs"
+      - "plugins/opencode/scripts/safe-command.mjs"
+      - "scripts/bump-version.mjs"
+      - "tests/process.test.mjs"

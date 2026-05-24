@@ -398,7 +398,7 @@ export async function applyWorktreePatch(repoRoot, worktreePath, baseCommit) {
   }
   const patchPath = path.join(
     repoRoot,
-    `.opencode-worktree-${Date.now()}-${Math.random().toString(16).slice(2)}.patch`
+    `.opencode-worktree-${Date.now()}-${crypto.randomBytes(4).toString("hex")}.patch`
   );
   let applied = false;
   try {

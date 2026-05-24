@@ -95,38 +95,6 @@ import {
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(import.meta.dirname, "..");
 
 // ------------------------------------------------------------------
-// Subcommand dispatch
-// ------------------------------------------------------------------
-
-const [subcommand, ...argv] = process.argv.slice(2);
-
-const handlers = {
-  setup: handleSetup,
-  review: handleReview,
-  "adversarial-review": handleAdversarialReview,
-  task: handleTask,
-  "task-worker": handleTaskWorker,
-  "task-resume-candidate": handleTaskResumeCandidate,
-  "last-review": handleLastReview,
-  "worktree-cleanup": handleWorktreeCleanup,
-  status: handleStatus,
-  result: handleResult,
-  cancel: handleCancel,
-};
-
-const handler = handlers[subcommand];
-if (!handler) {
-  console.error(`Unknown subcommand: ${subcommand}`);
-  console.error(`Available: ${Object.keys(handlers).join(", ")}`);
-  process.exit(1);
-}
-
-handler(argv).catch((err) => {
-  console.error(`Error in ${subcommand}: ${err.message}`);
-  process.exit(1);
-});
-
-// ------------------------------------------------------------------
 // Setup
 // ------------------------------------------------------------------
 
@@ -1206,3 +1174,39 @@ function extractResponseText(response) {
 
   return JSON.stringify(response, null, 2);
 }
+
+// ------------------------------------------------------------------
+// Subcommand dispatch
+// ------------------------------------------------------------------
+
+const [subcommand, ...argv] = process.argv.slice(2);
+
+const handlers = new Map([
+  ["setup", handleSetup],
+  ["review", handleReview],
+  ["adversarial-review", handleAdversarialReview],
+  ["task", handleTask],
+  ["task-worker", handleTaskWorker],
+  ["task-resume-candidate", handleTaskResumeCandidate],
+  ["last-review", handleLastReview],
+  ["worktree-cleanup", handleWorktreeCleanup],
+  ["status", handleStatus],
+  ["result", handleResult],
+  ["cancel", handleCancel]
+]);
+
+const handler = handlers.get(subcommand);
+if (!handler) {
+  const available = [];
+  for (const name of handlers.keys()) {
+    available.push(name);
+  }
+  console.error(`Unknown subcommand: ${subcommand}`);
+  console.error(`Available: ${available.join(", ")}`);
+  process.exit(1);
+}
+
+handler(argv).catch((err) => {
+  console.error(`Error in ${subcommand}: ${err.message}`);
+  process.exit(1);
+});

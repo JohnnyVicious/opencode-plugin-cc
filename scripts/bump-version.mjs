@@ -145,11 +145,13 @@ function findMarketplacePlugin(json) {
 
 function readJson(root, file) {
   const filePath = path.join(root, file);
+  // eslint-disable-next-line security/detect-non-literal-fs-filename -- file is one of the fixed manifest targets under the selected root.
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
 
 function writeJson(root, file, json) {
   const filePath = path.join(root, file);
+  // eslint-disable-next-line security/detect-non-literal-fs-filename -- file is one of the fixed manifest targets under the selected root.
   fs.writeFileSync(filePath, `${JSON.stringify(json, null, 2)}\n`);
 }
 

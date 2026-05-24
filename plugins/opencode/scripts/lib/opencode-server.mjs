@@ -25,7 +25,12 @@ import { spawn } from "node:child_process";
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
-import { platformShellOption, isProcessAlive as isProcessAliveWithToken } from "./process.mjs";
+import {
+  withPlatformShell,
+  isProcessAlive as isProcessAliveWithToken,
+  resolveOpencodeBinary,
+  commandForPlatformShell,
+} from "./process.mjs";
 import { loadState } from "./state.mjs";
 
 const DEFAULT_PORT = 4096;
@@ -41,11 +46,56 @@ const SERVER_REAP_IDLE_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 // this — this constant is the per-HTTP-call fallback, not the
 // authoritative cap.
 const DEFAULT_PROMPT_TIMEOUT_MS = 30 * 60 * 1000;
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
 function resolvePromptTimeoutMs() {
   const fromEnv = Number(process.env.OPENCODE_COMPANION_PROMPT_TIMEOUT_MS);
   if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
   return DEFAULT_PROMPT_TIMEOUT_MS;
+}
+
+function normalizeLoopbackHost(host) {
+  const value = String(host || DEFAULT_HOST).trim();
+  if (!LOOPBACK_HOSTS.has(value)) {
+    throw new Error(`OpenCode server host must be loopback-only, got: ${value}`);
+  }
+  return value;
+}
+
+function normalizePort(port) {
+  const value = Number(port);
+  if (!Number.isInteger(value) || value <= 0 || value > 65535) {
+    throw new Error(`OpenCode server port must be an integer from 1 to 65535, got: ${port}`);
+  }
+  return value;
+}
+
+function assertLoopbackUrl(urlString) {
+  const url = new URL(urlString);
+  if (url.protocol !== "http:" || !LOOPBACK_HOSTS.has(url.hostname)) {
+    throw new Error(`OpenCode API URL must be loopback http, got: ${url.origin}`);
+  }
+  return url;
+}
+
+function buildServerUrl(host, port, pathname) {
+  const normalizedHost = normalizeLoopbackHost(host);
+  const normalizedPort = normalizePort(port);
+  const urlHost = normalizedHost === "::1" ? "[::1]" : normalizedHost;
+  return new URL(pathname, `http://${urlHost}:${normalizedPort}`).toString();
+}
+
+function buildListenHost(host) {
+  return host === "[::1]" ? "::1" : host;
+}
+
+function buildClientUrl(baseUrl, requestPath) {
+  const base = assertLoopbackUrl(baseUrl);
+  const url = new URL(requestPath, base);
+  if (url.origin !== base.origin) {
+    throw new Error(`OpenCode API request escaped loopback origin: ${requestPath}`);
+  }
+  return url.toString();
 }
 
 /**
@@ -139,7 +189,8 @@ function serverStatePath(workspacePath) {
 function loadServerState(workspacePath) {
   try {
     const p = serverStatePath(workspacePath);
-    return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : {};
+    if (!fs.existsSync(p)) return {};
+    return JSON.parse(fs.readFileSync(p, "utf8"));
   } catch {
     return {};
   }
@@ -180,6 +231,24 @@ export function getBundledConfigDir() {
   return null;
 }
 
+function clearDeadTrackedServer(cwd) {
+  const state = loadServerState(cwd);
+  if (state.lastServerPid && !isProcessAlive(state.lastServerPid)) {
+    delete state.lastServerPid;
+    delete state.lastServerStartedAt;
+    saveServerState(cwd, state);
+  }
+}
+
+function buildServerEnv() {
+  const env = { ...process.env };
+  const bundledConfigDir = getBundledConfigDir();
+  if (bundledConfigDir) {
+    env.OPENCODE_CONFIG_DIR = bundledConfigDir;
+  }
+  return env;
+}
+
 /**
  * Check if an OpenCode server is already running on the given port.
  * @param {string} host
@@ -188,7 +257,8 @@ export function getBundledConfigDir() {
  */
 export async function isServerRunning(host = DEFAULT_HOST, port = DEFAULT_PORT) {
   try {
-    const res = await fetch(`http://${host}:${port}/global/health`, {
+    const healthUrl = buildServerUrl(host, port, "/global/health");
+    const res = await fetch(healthUrl, {
       signal: AbortSignal.timeout(3000),
     });
     return res.ok;
@@ -206,21 +276,16 @@ export async function isServerRunning(host = DEFAULT_HOST, port = DEFAULT_PORT) 
  * @returns {Promise<{ url: string, pid?: number, alreadyRunning: boolean }>}
  */
 export async function ensureServer(opts = {}) {
-  const host = opts.host ?? DEFAULT_HOST;
-  const port = opts.port ?? DEFAULT_PORT;
-  const url = `http://${host}:${port}`;
+  const host = normalizeLoopbackHost(opts.host ?? DEFAULT_HOST);
+  const port = normalizePort(opts.port ?? DEFAULT_PORT);
+  const url = buildServerUrl(host, port, "/");
 
   if (await isServerRunning(host, port)) {
     // A server is already on the port. Only clear tracked state if the
     // tracked pid is dead (stale from a prior run) — otherwise it may be
     // a plugin-owned server from a previous session that reapServerIfOurs
     // should still be able to identify on SessionEnd.
-    const state = loadServerState(opts.cwd);
-    if (state.lastServerPid && !isProcessAlive(state.lastServerPid)) {
-      delete state.lastServerPid;
-      delete state.lastServerStartedAt;
-      saveServerState(opts.cwd, state);
-    }
+    clearDeadTrackedServer(opts.cwd);
     return { url, alreadyRunning: true };
   }
 
@@ -236,20 +301,23 @@ export async function ensureServer(opts = {}) {
   // running, they get whatever config that server was started with, and
   // the caller is expected to fall back to `build` when `review` is
   // unavailable.
-  const env = { ...process.env };
-  const bundledConfigDir = getBundledConfigDir();
-  if (bundledConfigDir) {
-    env.OPENCODE_CONFIG_DIR = bundledConfigDir;
+  const env = buildServerEnv();
+
+  const opencodeBin = await resolveOpencodeBinary();
+  if (!opencodeBin) {
+    throw new Error("Failed to start OpenCode server: opencode CLI not found on PATH.");
   }
 
-  const proc = spawn("opencode", ["serve", "--port", String(port)], {
-    stdio: "ignore",
-    detached: true,
-    cwd: opts.cwd,
-    env,
-    shell: platformShellOption(),
-    windowsHide: true,
-  });
+  const proc = spawn(
+    commandForPlatformShell(opencodeBin), // NOSONAR: opencodeBin is resolved before spawning, so this does not rely on PATH lookup.
+    ["serve", "--hostname", buildListenHost(host), "--port", String(port)],
+    withPlatformShell({
+      stdio: "ignore",
+      detached: true,
+      cwd: opts.cwd,
+      env,
+    })
+  );
   let spawnError = null;
   let earlyExit = null;
   proc.once("error", (err) => {
@@ -295,6 +363,7 @@ export async function ensureServer(opts = {}) {
  * @returns {OpenCodeClient}
  */
 export function createClient(baseUrl, opts = {}) {
+  const safeBaseUrl = assertLoopbackUrl(baseUrl).origin;
   const headers = {
     "Content-Type": "application/json",
   };
@@ -308,7 +377,8 @@ export function createClient(baseUrl, opts = {}) {
   }
 
   async function request(method, path, body) {
-    const res = await fetch(`${baseUrl}${path}`, {
+    const requestUrl = buildClientUrl(safeBaseUrl, path);
+    const res = await fetch(requestUrl, {
       method,
       headers,
       body: body != null ? JSON.stringify(body) : undefined,
@@ -326,7 +396,7 @@ export function createClient(baseUrl, opts = {}) {
   }
 
   return {
-    baseUrl,
+    baseUrl: safeBaseUrl,
 
     // Health
     health: () => request("GET", "/global/health"),
@@ -371,7 +441,7 @@ export function createClient(baseUrl, opts = {}) {
       if (opts.tools) body.tools = opts.tools;
 
       const { status, body: responseText } = await httpPostJson(
-        `${baseUrl}/session/${sessionId}/message`,
+        buildClientUrl(safeBaseUrl, `/session/${sessionId}/message`),
         headers,
         body
       );
@@ -413,7 +483,8 @@ export function createClient(baseUrl, opts = {}) {
 
     // Events (SSE) - returns a ReadableStream
     subscribeEvents: async () => {
-      const res = await fetch(`${baseUrl}/event`, {
+      const eventUrl = buildClientUrl(safeBaseUrl, "/event");
+      const res = await fetch(eventUrl, {
         headers: { ...headers, Accept: "text/event-stream" },
       });
       return res.body;

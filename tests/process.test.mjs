@@ -5,10 +5,22 @@ import path from "node:path";
 import { createTmpDir, cleanupTmpDir } from "./helpers.mjs";
 import {
   runCommand,
+  commandForPlatformShell,
+  resolveOpencodeBinary,
   getOpencodeVersion,
   findOpencodeAuthFile,
   getConfiguredProviders,
 } from "../plugins/opencode/scripts/lib/process.mjs";
+
+function mockPlatform(value) {
+  const original = Object.getOwnPropertyDescriptor(process, "platform");
+  Object.defineProperty(process, "platform", {
+    configurable: true,
+    enumerable: original?.enumerable ?? true,
+    value,
+  });
+  return () => Object.defineProperty(process, "platform", original);
+}
 
 describe("process", () => {
   it("runCommand captures stdout", async () => {
@@ -66,6 +78,71 @@ describe("process", () => {
     try {
       assert.equal(await getOpencodeVersion(), null);
     } finally {
+      if (oldPath === undefined) delete process.env.PATH;
+      else process.env.PATH = oldPath;
+      if (oldPathUpper === undefined) delete process.env.Path;
+      else process.env.Path = oldPathUpper;
+    }
+  });
+
+  it("commandForPlatformShell quotes Windows shell metacharacter paths", () => {
+    const restorePlatform = mockPlatform("win32");
+    const oldShell = process.env.SHELL;
+    delete process.env.SHELL;
+    try {
+      const metacharPath = String.raw`C:\Users\A&B\opencode.cmd`;
+      const plainPath = String.raw`C:\Tools\opencode.cmd`;
+      assert.equal(
+        commandForPlatformShell(metacharPath),
+        `"${metacharPath}"`
+      );
+      assert.equal(
+        commandForPlatformShell(plainPath),
+        plainPath
+      );
+    } finally {
+      restorePlatform();
+      if (oldShell === undefined) delete process.env.SHELL;
+      else process.env.SHELL = oldShell;
+    }
+  });
+
+  it("resolveOpencodeBinary prefers path-only shell lookup on Windows POSIX shells", async (t) => {
+    if (!fs.existsSync("/bin/bash")) {
+      t.skip("/bin/bash is required for the POSIX shell lookup simulation");
+      return;
+    }
+
+    const tmpDir = createTmpDir("opencode-path");
+    const restorePlatform = mockPlatform("win32");
+    const oldShell = process.env.SHELL;
+    const oldBashEnv = process.env.BASH_ENV;
+    const oldPath = process.env.PATH;
+    const oldPathUpper = process.env.Path;
+    try {
+      const fakeOpencode = path.join(tmpDir, "opencode");
+      const bashEnv = path.join(tmpDir, "bashenv");
+      fs.symlinkSync("/bin/true", fakeOpencode);
+      fs.writeFileSync(
+        bashEnv,
+        String.raw`opencode() { printf 'function body should not be returned\n'; }
+`,
+        "utf8"
+      );
+
+      process.env.SHELL = "/bin/bash";
+      process.env.BASH_ENV = bashEnv;
+      process.env.PATH = `${tmpDir}:${oldPath ?? ""}`;
+      if (oldPathUpper !== undefined) process.env.Path = process.env.PATH;
+
+      assert.equal(await resolveOpencodeBinary(), fakeOpencode);
+    } finally {
+      restorePlatform();
+      cleanupTmpDir(tmpDir);
+      if (oldShell === undefined) delete process.env.SHELL;
+      else process.env.SHELL = oldShell;
+      if (oldBashEnv === undefined) delete process.env.BASH_ENV;
+      else process.env.BASH_ENV = oldBashEnv;
       if (oldPath === undefined) delete process.env.PATH;
       else process.env.PATH = oldPath;
       if (oldPathUpper === undefined) delete process.env.Path;

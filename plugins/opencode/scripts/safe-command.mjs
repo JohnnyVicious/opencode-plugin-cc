@@ -8,16 +8,44 @@
 // shapes to opencode-companion.mjs.
 
 import { spawnSync } from "node:child_process";
-import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 const companionScript = path.join(import.meta.dirname, "opencode-companion.mjs");
+const TASK_BOOLEAN_FLAGS = new Set(["--background", "--worktree", "--free"]);
+const TASK_FREE_FLAGS = new Set(["--free"]);
+const TASK_NOOP_FLAGS = new Set(["--wait", "--fresh"]);
+const TASK_RESUME_FLAGS = new Set(["--resume", "--resume-last"]);
+const TASK_MODEL_FLAGS = new Set(["--model"]);
+const TASK_AGENT_FLAGS = new Set(["--agent"]);
+const TASK_AGENT_VALUES = new Set(["build", "plan"]);
+const SETUP_JSON_FLAGS = new Set(["--json"]);
+const SETUP_BOOLEAN_FLAGS = new Set(["--enable-review-gate", "--disable-review-gate"]);
+const SETUP_VALUE_FLAGS = new Set([
+  "--review-gate-max",
+  "--review-gate-cooldown",
+  "--default-model",
+  "--default-agent"
+]);
+const SETUP_POSITIVE_INTEGER_OR_OFF_FLAGS = new Set(["--review-gate-max", "--review-gate-cooldown"]);
+const SETUP_OFF_VALUES = new Set(["off"]);
 
-function main() {
+function readStdin() {
+  return new Promise((resolve, reject) => {
+    let raw = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => {
+      raw += chunk;
+    });
+    process.stdin.on("end", () => resolve(raw.trim()));
+    process.stdin.on("error", reject);
+  });
+}
+
+async function main() {
   const subcommand = process.argv[2];
-  const raw = fs.readFileSync(0, "utf8").trim();
+  const raw = await readStdin();
 
   try {
     const args = buildForwardArgs(subcommand, raw);
@@ -37,7 +65,12 @@ function main() {
 // Only run the script body when invoked directly. Importing this file
 // from a test module must not swallow stdin or exit the process.
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  main();
+  try {
+    await main();
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
 }
 
 export function buildForwardArgs(command, text) {
@@ -107,8 +140,8 @@ function parseTaskArgs(text) {
     const [token, rest] = peeled;
 
     // --- Boolean flags forwarded as-is ---
-    if (token === "--background" || token === "--worktree" || token === "--free") {
-      if (token === "--free") sawFree = true;
+    if (TASK_BOOLEAN_FLAGS.has(token)) {
+      if (TASK_FREE_FLAGS.has(token)) sawFree = true;
       out.push(token);
       remaining = rest;
       continue;
@@ -119,20 +152,20 @@ function parseTaskArgs(text) {
     // companion has no --wait flag, so we drop it here.
     // --fresh means "do not add --resume-last", which at this layer is
     // also a no-op (we only emit --resume-last when --resume is present).
-    if (token === "--wait" || token === "--fresh") {
+    if (TASK_NOOP_FLAGS.has(token)) {
       remaining = rest;
       continue;
     }
 
     // --- User-facing --resume → companion-native --resume-last ---
-    if (token === "--resume" || token === "--resume-last") {
+    if (TASK_RESUME_FLAGS.has(token)) {
       out.push("--resume-last");
       remaining = rest;
       continue;
     }
 
     // --- Value flag: --model ---
-    if (token === "--model") {
+    if (TASK_MODEL_FLAGS.has(token)) {
       const valuePeeled = peelToken(rest);
       if (!valuePeeled) throw new Error("--model requires a value.");
       const [value, afterValue] = valuePeeled;
@@ -148,11 +181,11 @@ function parseTaskArgs(text) {
     }
 
     // --- Value flag: --agent (only build|plan) ---
-    if (token === "--agent") {
+    if (TASK_AGENT_FLAGS.has(token)) {
       const valuePeeled = peelToken(rest);
       if (!valuePeeled) throw new Error("--agent requires a value.");
       const [value, afterValue] = valuePeeled;
-      if (value !== "build" && value !== "plan") {
+      if (!TASK_AGENT_VALUES.has(value)) {
         throw new Error("--agent value must be 'build' or 'plan'.");
       }
       out.push("--agent", value);
@@ -187,26 +220,21 @@ function parseSetupArgs(text) {
 
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
-    if (token === "--json") {
+    if (SETUP_JSON_FLAGS.has(token)) {
       continue;
     }
-    if (token === "--enable-review-gate" || token === "--disable-review-gate") {
+    if (SETUP_BOOLEAN_FLAGS.has(token)) {
       out.push(token);
       continue;
     }
-    if (
-      token === "--review-gate-max" ||
-      token === "--review-gate-cooldown" ||
-      token === "--default-model" ||
-      token === "--default-agent"
-    ) {
+    if (SETUP_VALUE_FLAGS.has(token)) {
       const value = tokens[++i];
       if (value == null) {
         throw new Error(`${token} requires a value.`);
       }
       if (
-        (token === "--review-gate-max" || token === "--review-gate-cooldown") &&
-        value !== "off" &&
+        SETUP_POSITIVE_INTEGER_OR_OFF_FLAGS.has(token) &&
+        !SETUP_OFF_VALUES.has(value) &&
         !/^[1-9][0-9]*$/.test(value)
       ) {
         throw new Error(`${token} must be a positive integer or "off".`);
