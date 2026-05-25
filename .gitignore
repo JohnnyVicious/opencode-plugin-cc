@@ -3,3 +3,9 @@ node_modules/
 *.log
 .generated/
 /tmp/
+
+# Ignore local Claude runtime state and worktrees
+.claude/**
+
+# Ignore insiders AI rules
+.github/instructions/codacy.instructions.md
