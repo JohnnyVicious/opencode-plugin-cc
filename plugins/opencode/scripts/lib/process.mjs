@@ -32,18 +32,47 @@ export function platformShellOption() {
 }
 
 /**
- * Resolve the full path to the `opencode` binary.
- * @returns {Promise<string|null>}
+ * Add the platform shell only when Windows needs it for command shims.
+ * POSIX spawns stay direct argv execs.
+ * @param {object} options
+ * @returns {object}
  */
-export async function resolveOpencodeBinary() {
+export function withPlatformShell(options = {}) {
+  const shell = platformShellOption();
+  if (shell === false) return { ...options, windowsHide: true };
+  return { ...options, shell, windowsHide: true };
+}
+
+const WINDOWS_SHELL_SAFE_COMMAND_CHARS = new Set([
+  ..."ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+  "_",
+  "-",
+  ".",
+  ":",
+  "/",
+  "\\",
+]);
+
+function shouldQuoteForWindowsShell(command) {
+  return Array.from(command).some((ch) => !WINDOWS_SHELL_SAFE_COMMAND_CHARS.has(ch));
+}
+
+/**
+ * Quote a resolved command path when Windows has to run it through a shell.
+ * This preserves paths with spaces while leaving POSIX direct spawns alone.
+ * @param {string} command
+ * @returns {string}
+ */
+export function commandForPlatformShell(command) {
+  if (process.platform !== "win32" || platformShellOption() === false) return command;
+  if (!shouldQuoteForWindowsShell(command)) return command;
+  const escapedCommand = command.replaceAll('"', String.raw`\"`);
+  return `"${escapedCommand}"`;
+}
+
+function resolveCommandPath(command, args, options) {
   return new Promise((resolve) => {
-    const isWin = process.platform === "win32";
-    const locator = isWin ? "where" : "which";
-    const proc = spawn(locator, ["opencode"], {
-      stdio: ["ignore", "pipe", "ignore"],
-      shell: platformShellOption(),
-      windowsHide: true,
-    });
+    const proc = spawn(command, args, options);
     let out = "";
     let settled = false;
     const finish = (value) => {
@@ -55,10 +84,45 @@ export async function resolveOpencodeBinary() {
     proc.on("error", () => finish(null));
     proc.on("close", (code) => {
       if (code !== 0) return finish(null);
-      // `where` returns all matches separated by CRLF; pick the first.
+      // Windows `where` returns all matches separated by CRLF; pick the first.
       const first = out.trim().split(/\r?\n/)[0] ?? "";
       finish(first || null);
     });
+  });
+}
+
+/**
+ * Resolve the full path to the `opencode` binary.
+ * @returns {Promise<string|null>}
+ */
+export async function resolveOpencodeBinary() {
+  if (process.platform === "win32" && process.env.SHELL) {
+    const fromShell = await resolveCommandPath(
+      process.env.SHELL,
+      [
+        "-lc",
+        "type -P opencode 2>/dev/null || " +
+          "which opencode 2>/dev/null || " +
+          "where.exe opencode || where opencode",
+      ],
+      {
+        stdio: ["ignore", "pipe", "ignore"],
+        windowsHide: true,
+      }
+    );
+    if (fromShell) return fromShell;
+  }
+
+  if (process.platform === "win32") {
+    return resolveCommandPath("where.exe", ["opencode"], {
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+    });
+  }
+
+  return resolveCommandPath("which", ["opencode"], {
+    stdio: ["ignore", "pipe", "ignore"],
+    windowsHide: true,
   });
 }
 
@@ -76,12 +140,13 @@ export async function isOpencodeInstalled() {
  * @returns {Promise<string|null>}
  */
 export async function getOpencodeVersion() {
+  const bin = await resolveOpencodeBinary();
+  if (!bin) return null;
+
   return new Promise((resolve) => {
-    const proc = spawn("opencode", ["--version"], {
+    const proc = spawn(commandForPlatformShell(bin), ["--version"], withPlatformShell({ // NOSONAR: bin is resolved before spawning, so this does not rely on PATH lookup.
       stdio: ["ignore", "pipe", "ignore"],
-      shell: platformShellOption(),
-      windowsHide: true,
-    });
+    }));
     let out = "";
     let settled = false;
     const finish = (value) => {
@@ -111,13 +176,11 @@ export async function getOpencodeVersion() {
  */
 export function runCommand(cmd, args, opts = {}) {
   return new Promise((resolve) => {
-    const proc = spawn(cmd, args, {
+    const proc = spawn(cmd, args, withPlatformShell({
       stdio: ["ignore", "pipe", "pipe"],
       cwd: opts.cwd,
       env: { ...process.env, ...opts.env },
-      shell: platformShellOption(),
-      windowsHide: true,
-    });
+    }));
 
     const maxOutputBytes = Number.isFinite(opts.maxOutputBytes) && opts.maxOutputBytes > 0
       ? opts.maxOutputBytes
@@ -182,14 +245,12 @@ export function runCommand(cmd, args, opts = {}) {
  * @returns {import("node:child_process").ChildProcess}
  */
 export function spawnDetached(cmd, args, opts = {}) {
-  const child = spawn(cmd, args, {
+  const child = spawn(cmd, args, withPlatformShell({
     stdio: "ignore",
     detached: true,
     cwd: opts.cwd,
     env: { ...process.env, ...opts.env },
-    shell: platformShellOption(),
-    windowsHide: true,
-  });
+  }));
   child.on("error", () => {});
   child.unref();
   return child;
@@ -219,9 +280,8 @@ export function getProcessStartToken(pid) {
   }
 
   if (process.platform === "darwin" || process.platform === "freebsd") {
-    const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+    const result = spawnSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], {
       encoding: "utf8",
-      shell: platformShellOption(),
       windowsHide: true,
     });
     const started = result.status === 0 ? result.stdout.trim() : "";
